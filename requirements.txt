@@ -1,0 +1,11 @@
+# Runtime dependencies for Python 3.10+
+cryptography==48.0.0
+markdown-it-py==4.2.0
+openai==2.38.0
+openpyxl==3.1.5
+plotly==6.7.0
+pypdf==6.14.2
+python-docx==1.2.0
+python-dotenv==1.2.2
+requests==2.34.2
+streamlit==1.62.0

@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local agent skills
+/.agents/skills/
+
+# Keep plaintext report, glossary, executive-summary, and network data local.
+/data/*
+!/data/encrypted/
+!/data/encrypted/SRSOD.enc
+# Generated GPT term summaries are plaintext encryption inputs only.
+/data/analysis/term_usage_summaries.json
+.DS_Store
+handoff.md
+.gitignore
+.gitignore
+thoughts.md
