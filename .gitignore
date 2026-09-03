@@ -231,3 +231,8 @@ handoff.md
 .gitignore
 .gitignore
 thoughts.md
+*.png
+
+# Local GitHub Copilot project instructions
+/.github/copilot-instructions.md
+copilot-instructions.md

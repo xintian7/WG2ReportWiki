@@ -19,7 +19,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 
 
-SOURCE_NAME = "AR6-FGD"
+SOURCE_NAME = "AR6"
 DIRECT_PARENT_PREFIX_RE = re.compile(r"^See(?!\s+also\b)\s+.+?\s+\(under\s+", re.IGNORECASE)
 DIRECT_SEE_RE = re.compile(r"^See(?!\s+also\b)\s+(?P<term>.+?)\.?$", re.IGNORECASE)
 

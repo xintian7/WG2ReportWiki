@@ -280,6 +280,8 @@ SANKEY_DIAGRAM_LABEL = "Sankey diagram (under development)"
 SETTINGS_ACCESS_LABEL = "Access"
 USER_GUIDE_LABEL = "User Guide"
 LLM_SUMMARY_EXCLUDED_TERM_KEYS = frozenset({"confidence"})
+AR6_SOURCE_LABEL = "AR6"
+LEGACY_AR6_SOURCE_LABEL = "AR6-FGD"
 
 SECTION_LABELS = [
     "Author Team",
@@ -324,6 +326,11 @@ SUMMARY_MARKDOWN_RENDERER = MarkdownIt("commonmark", {"html": False}).enable("ta
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def normalize_source_label(source: str) -> str:
+    """Map legacy glossary source labels to their current display names."""
+    return AR6_SOURCE_LABEL if source == LEGACY_AR6_SOURCE_LABEL else source
 
 
 def llm_summary_not_applied_message(term: str) -> str:
@@ -504,7 +511,7 @@ def definition_for_source(definitions: list[GlossaryDefinition], source: str) ->
 
 def glossary_source_label(definitions: list[GlossaryDefinition]) -> str:
     """Format glossary definition sources in their established display order."""
-    source_order = ("SRCities-SOD", "AR6-FGD")
+    source_order = ("SRCities-SOD", AR6_SOURCE_LABEL)
     available_sources = {source for _, _, _, source in definitions}
     return " + ".join(source for source in source_order if source in available_sources)
 
@@ -541,7 +548,7 @@ def build_term_usage_summary_prompt(
     replacements = {
         "{term}": term,
         "{srcities_sod_definition_or_not_available}": definition_for_source(definitions, "SRCities-SOD"),
-        "{ar6_fgd_definition_or_not_available}": definition_for_source(definitions, "AR6-FGD"),
+        "{ar6_fgd_definition_or_not_available}": definition_for_source(definitions, AR6_SOURCE_LABEL),
         "{statement_sentence_table}": statement_sentence_table,
     }
     prompt = prompt_template
@@ -1169,7 +1176,7 @@ def parse_term_usage_summaries(json_text: str) -> TermUsageSummaries:
         normalized_key = normalize_text(term_key).casefold()
         if not normalized_key or not isinstance(summary, str) or not summary.strip():
             raise ValueError("Precomputed term summary entries must contain nonempty text.")
-        summaries[normalized_key] = summary.strip()
+        summaries[normalized_key] = summary.strip().replace(LEGACY_AR6_SOURCE_LABEL, AR6_SOURCE_LABEL)
     return summaries
 
 
@@ -1188,7 +1195,10 @@ def load_encrypted_assets(
         decrypted_payload = get_fernet().decrypt(path.read_bytes())
         with ZipFile(BytesIO(decrypted_payload)) as archive:
             report_text = archive.read(REPORT_ARCHIVE_NAME).decode("utf-8")
-            term_usage_summary_prompt = archive.read(TERM_USAGE_SUMMARY_PROMPT_ARCHIVE_NAME).decode("utf-8")
+            term_usage_summary_prompt = archive.read(TERM_USAGE_SUMMARY_PROMPT_ARCHIVE_NAME).decode("utf-8").replace(
+                LEGACY_AR6_SOURCE_LABEL,
+                AR6_SOURCE_LABEL,
+            )
             term_usage_summaries = (
                 parse_term_usage_summaries(archive.read(TERM_USAGE_SUMMARIES_ARCHIVE_NAME).decode("utf-8"))
                 if TERM_USAGE_SUMMARIES_ARCHIVE_NAME in archive.namelist()
@@ -1216,7 +1226,9 @@ def load_encrypted_assets(
                     explanation = normalize_text(row[explanation_index] if explanation_index < len(row) else "")
                     parent_value = row[parent_index] if parent_index is not None and parent_index < len(row) else None
                     parent = normalize_text(str(parent_value)) if parent_value is not None else ""
-                    source = normalize_text(row[source_index] if source_index < len(row) else "")
+                    source = normalize_source_label(
+                        normalize_text(row[source_index] if source_index < len(row) else "")
+                    )
                     if not term or not explanation or not source:
                         continue
                     definition = (term, explanation, parent, source)
@@ -1225,7 +1237,7 @@ def load_encrypted_assets(
                         definitions.append(definition)
                 workbook.close()
 
-            source_order = {"SRCities-SOD": 0, "AR6-FGD": 1}
+            source_order = {"SRCities-SOD": 0, AR6_SOURCE_LABEL: 1}
             for definitions in glossary.values():
                 definitions.sort(key=lambda definition: (source_order.get(definition[3], 2), definition[3]))
 

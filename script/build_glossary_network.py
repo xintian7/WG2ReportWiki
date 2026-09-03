@@ -19,6 +19,7 @@ from srcities_streamlit_app import (
     STATEMENT_NUMBER_RE,
     glossary_usage_counts,
     markdown_to_plain_text,
+    normalize_source_label,
     parse_markdown_sections,
 )
 
@@ -68,7 +69,7 @@ def load_glossary() -> Glossary:
             term = cell_text(row[term_index] if term_index < len(row) else None)
             explanation = cell_text(row[explanation_index] if explanation_index < len(row) else None)
             parent = cell_text(row[parent_index]) if parent_index is not None and parent_index < len(row) else ""
-            source = cell_text(row[source_index] if source_index < len(row) else None)
+            source = normalize_source_label(cell_text(row[source_index] if source_index < len(row) else None))
             if not term or not explanation or not source:
                 continue
 
@@ -78,7 +79,7 @@ def load_glossary() -> Glossary:
                 definitions.append(definition)
         workbook.close()
 
-    source_order = {"SRCities-SOD": 0, "AR6-FGD": 1}
+    source_order = {"SRCities-SOD": 0, "AR6": 1}
     for definitions in glossary.values():
         definitions.sort(key=lambda definition: (source_order.get(definition[3], 2), definition[3]))
     return glossary
