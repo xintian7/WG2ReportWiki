@@ -225,7 +225,7 @@ __marimo__/
 !/data/encrypted/
 !/data/encrypted/SRSOD.enc
 # Generated GPT term summaries are plaintext encryption inputs only.
-/data/analysis/term_usage_summaries.json
+/data/analysis/llm_term_check.json
 .DS_Store
 handoff.md
 .gitignore

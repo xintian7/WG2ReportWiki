@@ -24,7 +24,7 @@ EXECUTIVE_SUMMARY_INPUT_PATHS = tuple(
     for chapter in range(1, 6)
 )
 TERM_USAGE_SUMMARY_PROMPT_INPUT_PATH = REPO_ROOT / "data/prompt/llm_term_usage_summary_prompt.md"
-TERM_USAGE_SUMMARIES_INPUT_PATH = REPO_ROOT / "data/analysis/term_usage_summaries.json"
+TERM_USAGE_SUMMARIES_INPUT_PATH = REPO_ROOT / "data/analysis/llm_term_check.json"
 INPUT_PATHS = (
     REPO_ROOT / "data/Glossary/AR6FGD_Glossary.xlsx",
     REPO_ROOT / "data/Glossary/AR7SOD_Glossary.xlsx",

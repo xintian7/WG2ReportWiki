@@ -32,7 +32,7 @@ DEFAULT_WGI_PATH = REPO_ROOT / "data/Glossary/AR6WGI_glossary.doc"
 DEFAULT_WGII_PATH = REPO_ROOT / "data/Glossary/AR6WGII_glossary.doc"
 DEFAULT_WGIII_PATH = REPO_ROOT / "data/Glossary/AR6WGIII_glossary.doc"
 DEFAULT_AR7SOD_PATH = REPO_ROOT / "data/Glossary/AR7SOD_Glossary.xlsx"
-DEFAULT_SOD_JSON_PATH = REPO_ROOT / "data/srsod-inspection.json"
+DEFAULT_SOD_JSON_PATH = REPO_ROOT / "data/srsod-structure.json"
 DEFAULT_OUTPUT_PATH = REPO_ROOT / "data/Glossary/AR6_AR7SOD_Glossary.xlsx"
 ENTRY_STYLE_RE = re.compile(
     r"(?:^|;)\s*margin-bottom\s*:\s*15px(?:;|$)",

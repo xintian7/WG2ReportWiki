@@ -264,7 +264,7 @@ USER_GUIDE_GLOSSARY_IMAGE_PATH = REPO_ROOT / "data" / "iamges4UG" / "image2.png"
 USER_GUIDE_LLM_SUMMARY_IMAGE_PATH = REPO_ROOT / "data" / "iamges4UG" / "image3.png"
 REPORT_ARCHIVE_NAME = "data/report/SRCities_FOD_SPM_Final.md"
 TERM_USAGE_SUMMARY_PROMPT_ARCHIVE_NAME = "data/prompt/llm_term_usage_summary_prompt.md"
-TERM_USAGE_SUMMARIES_ARCHIVE_NAME = "data/analysis/term_usage_summaries.json"
+TERM_USAGE_SUMMARIES_ARCHIVE_NAME = "data/analysis/llm_term_check.json"
 GLOSSARY_ARCHIVE_MEMBER_NAMES = (
     "data/Glossary/AR6FGD_Glossary.xlsx",
     "data/Glossary/AR7SOD_Glossary.xlsx",

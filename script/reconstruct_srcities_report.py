@@ -18,29 +18,24 @@ from pathlib import Path
 import re
 from typing import Any
 
-from srcities_streamlit_app import (
-    ENCRYPTED_REPORT_PATH,
-    Glossary,
-    build_glossary_pattern,
-    glossary_parent_label,
-    glossary_source_label,
-    highlight_term,
-    linkify_glossary_terms,
-    load_encrypted_assets,
-)
+from openpyxl import load_workbook
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE_JSON = REPO_ROOT / "data" / "srsod-inspection.json"
-DEFAULT_REFERENCE_HTML = REPO_ROOT / "data" / "export" / "srsod-reconstructed.html"
+DEFAULT_SOURCE_JSON = REPO_ROOT / "data" / "srsod-structure.json"
+DEFAULT_REFERENCE_HTML = REPO_ROOT / "data" / "export" / "deprecated_srsod-reconstructed.html"
 DEFAULT_OUTPUT_HTML = REPO_ROOT / "data" / "export" / "SRCities_terminology_review.html"
-REPORT_HEADER_TITLE = "SRCities terminology review (version Sep 3, 2026 based on SOD)"
+DEFAULT_GLOSSARY_PATH = REPO_ROOT / "data" / "Glossary" / "AR6_AR7SOD_Glossary_AO.xlsx"
+DEFAULT_TERM_SUMMARIES_PATH = REPO_ROOT / "data" / "analysis" / "llm_term_check.json"
+REPORT_HEADER_TITLE = "SRCities terminology review (version Sep 10, 2026 based on SOD)"
 REFERENCE_KICKER = '<p class="kicker">Reconstructed report</p>'
 OUTPUT_KICKER = '<p class="kicker">Reconstructed report in HTML</p>'
 GLOSSARY_TAB_ID = "glossary-overview-tab"
 GLOSSARY_PANEL_ID = "glossary-overview-panel"
 CAE_TAB_ID = "cae-check-tab"
 CAE_PANEL_ID = "cae-check-panel"
+GLOSSARY_ISSUE_TAB_ID = "glossary-issue-table-tab"
+GLOSSARY_ISSUE_PANEL_ID = "glossary-issue-table-panel"
 REPORT_ORDER = (
     "Chapter 1",
     "Chapter 2",
@@ -54,8 +49,34 @@ NODE_ID_RE = re.compile(r'\bdata-node-id="([^"]+)"')
 DOCUMENT_NODE_ID_RE = re.compile(r'data-node-id="([^"]+:document:[^"]+)"')
 IMAGE_SOURCE_RE = re.compile(r'<img\b[^>]*\bsrc="([^"]+)"', re.IGNORECASE)
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
-GlossaryOccurrence = tuple[str, str, str, str, str]
-GlossaryOccurrences = dict[str, list[GlossaryOccurrence]]
+POTENTIAL_ISSUES_SECTION_RE = re.compile(
+    r"^###\s+Potential issues(?:\s+(?:needing|for))?\s+substantive review[^\n]*\n"
+    r"(?P<content>.*?)(?=\n###\s|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+NO_POTENTIAL_ISSUE_RE = re.compile(r"^-?\s*none identified\b", re.IGNORECASE)
+MARKDOWN_BULLET_RE = re.compile(r"^(?P<indent>[ \t]*)-\s+(?P<content>.*)$")
+POTENTIAL_ISSUE_EVIDENCE_RE = re.compile(r'^(?:\[[^\]\n]+\](?:\s|$)|")')
+LLM_CONTEXTS_HEADING = "Contexts of use"
+LLM_POTENTIAL_ISSUES_HEADING = "Potential issues needing substantive review"
+LLM_CONCLUSION_HEADING = "Conclusion"
+AO_GLOSSARY_HEADERS = (
+    "term",
+    "equivalent terms",
+    "equivalent terms 2",
+    "equivalent terms -revised",
+    "equivalent terms 2 - revised",
+    "explanation (srcitiessod otherwise ar6)",
+    "source",
+    "parent terms",
+    "child terms",
+)
+EXCLUDED_ALIASES_BY_TERM_KEY: dict[str, set[str]] = {
+    "atmospheric rivers (ars)": {"ar"},
+}
+ALIAS_REPLACEMENTS_BY_TERM_KEY: dict[str, dict[str, str]] = {
+    "atmospheric rivers (ars)": {"atmospheric rivers": "Atmospheric river"},
+}
 AGREEMENT_LEVELS = ("low", "medium", "high")
 EVIDENCE_LEVELS = ("limited", "medium", "robust")
 CONFIDENCE_LEVELS = ("very low", "low", "medium", "medium to high", "high", "very high")
@@ -91,6 +112,132 @@ class CaeOccurrence:
     sentence: str
     assessment: str
     issue: str = ""
+
+
+@dataclass(frozen=True)
+class RevisedGlossaryEntry:
+    """One canonical glossary entry with its AO workbook search aliases."""
+
+    term: str
+    aliases: tuple[str, ...]
+    explanation: str
+    source: str
+    parent_terms: tuple[str, ...]
+    child_terms: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GlossaryOccurrence:
+    """One report sentence matched by a canonical term or revised alias."""
+
+    source_label: str
+    node_code: str
+    node_id: str
+    sentence: str
+    source_text: str
+    matched_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GlossaryIssueRow:
+    """One issue-table row derived from a term summary's potential issue section."""
+
+    section: str
+    sentence: str
+    term: str
+    issue: str
+    node_id: str = ""
+    source_label: str = ""
+
+
+RevisedGlossary = dict[str, RevisedGlossaryEntry]
+GlossaryMatchMap = dict[str, tuple[str, ...]]
+GlossaryOccurrences = dict[str, list[GlossaryOccurrence]]
+
+
+def normalize_text(value: object) -> str:
+    """Convert a source cell or report fragment to normalized plain text."""
+    return re.sub(r"\s+", " ", str(value or "").replace("\u00a0", " ")).strip()
+
+
+def split_cell_lines(value: object) -> tuple[str, ...]:
+    """Return unique non-empty newline-separated workbook values in source order."""
+    values = [normalize_text(line) for line in str(value or "").splitlines()]
+    return tuple(dict.fromkeys(value for value in values if value))
+
+
+def load_revised_glossary(input_path: Path) -> RevisedGlossary:
+    """Load AO terms from A, aliases from B-E, and detail fields from F-I."""
+    workbook = load_workbook(input_path, read_only=True, data_only=True)
+    try:
+        worksheet = workbook.active
+        headers = tuple(normalize_text(cell.value).casefold() for cell in worksheet[1])
+        if headers[: len(AO_GLOSSARY_HEADERS)] != AO_GLOSSARY_HEADERS:
+            raise ValueError(
+                "AO glossary columns A-I must be Term, four Equivalent Terms columns, "
+                "Explanation, Source, Parent Terms, and Child Terms."
+            )
+
+        glossary: RevisedGlossary = {}
+        for row in worksheet.iter_rows(min_row=2, values_only=True):
+            term = normalize_text(row[0])
+            if not term:
+                continue
+            term_key = term.casefold()
+            if term_key in glossary:
+                raise ValueError(f"AO glossary contains duplicate term: {term}")
+
+            alias_replacements = ALIAS_REPLACEMENTS_BY_TERM_KEY.get(term_key, {})
+            aliases = tuple(
+                alias
+                for alias in dict.fromkeys(
+                    alias_replacements.get(alias.casefold(), alias)
+                    for alias in [
+                        *split_cell_lines(row[1]),
+                        *split_cell_lines(row[2]),
+                        *split_cell_lines(row[3]),
+                        *split_cell_lines(row[4]),
+                    ]
+                )
+                if alias.casefold() != term_key
+                and alias.casefold() not in EXCLUDED_ALIASES_BY_TERM_KEY.get(term_key, set())
+            )
+            glossary[term_key] = RevisedGlossaryEntry(
+                term=term,
+                aliases=aliases,
+                explanation=normalize_text(row[5]),
+                source=normalize_text(row[6]),
+                parent_terms=split_cell_lines(row[7]),
+                child_terms=split_cell_lines(row[8]),
+            )
+    finally:
+        workbook.close()
+
+    if not glossary:
+        raise RuntimeError(f"No glossary terms were read from {input_path}.")
+    return glossary
+
+
+def build_glossary_match_map(glossary: RevisedGlossary) -> GlossaryMatchMap:
+    """Map each canonical term or alias to every canonical entry it represents."""
+    owners_by_name: dict[str, list[str]] = {}
+    for term_key, entry in glossary.items():
+        for name in (entry.term, *entry.aliases):
+            name_key = name.casefold()
+            owners = owners_by_name.setdefault(name_key, [])
+            if term_key not in owners:
+                owners.append(term_key)
+    return {name_key: tuple(owners) for name_key, owners in owners_by_name.items()}
+
+
+def build_glossary_match_pattern(match_map: GlossaryMatchMap) -> re.Pattern[str] | None:
+    """Build a longest-first case-insensitive pattern for canonical terms and aliases."""
+    if not match_map:
+        return None
+    return re.compile(
+        "|".join(re.escape(name) for name in sorted(match_map, key=len, reverse=True)),
+        re.IGNORECASE,
+    )
 
 
 @dataclass
@@ -317,6 +464,13 @@ GLOSSARY_CSS = """
             .glossary-term-button:disabled { color: var(--muted); cursor: default; }
             .glossary-term-count { color: #7a4b2a; font-weight: 400; }
             .glossary-term-source { color: #0076a8; font-weight: 400; }
+            .glossary-term-issue {
+                color: #c4271e;
+                display: inline-block;
+                font-size: 1rem;
+                font-weight: 700;
+                margin-left: .35rem;
+            }
             .glossary-detail[hidden] { display: none; }
             .glossary-detail h3 { font-size: 1.45rem; font-weight: 400; margin-top: .8rem; }
             .glossary-detail-heading {
@@ -325,7 +479,10 @@ GLOSSARY_CSS = """
                 flex-wrap: wrap;
                 gap: .3rem .45rem;
             }
-            .glossary-parent { color: var(--muted); margin: .4rem 0 0; }
+            .glossary-canonical-term,
+            .glossary-parent,
+            .glossary-child,
+            .glossary-aliases { color: var(--muted); margin: .4rem 0 0; }
             .glossary-definition {
                 border-left: 3px solid #9fcdd8;
                 margin-top: 1rem;
@@ -333,6 +490,67 @@ GLOSSARY_CSS = """
             }
             .glossary-definition h4 { color: var(--ipcc-blue); font-size: 1rem; }
             .glossary-definition p { margin: .35rem 0 0; overflow-wrap: anywhere; }
+            .glossary-llm-check {
+                border-top: 1px solid var(--rule);
+                margin-top: 1rem;
+                padding-top: .75rem;
+            }
+            .glossary-llm-check summary { color: var(--ipcc-blue); cursor: pointer; font-weight: 800; }
+            .glossary-llm-check-notebar {
+                align-items: center;
+                background: #d7ecff;
+                border: 1px solid #8bb7e0;
+                border-radius: 6px;
+                box-sizing: border-box;
+                color: var(--ink);
+                display: flex;
+                font: inherit;
+                margin-top: .55rem;
+                padding: .5rem .65rem;
+                width: 100%;
+            }
+            .glossary-llm-check-eye {
+                color: #0b4f86;
+                font-size: 1rem;
+                line-height: 1;
+                margin-right: .45rem;
+            }
+            .glossary-llm-check-note {
+                line-height: 1.35;
+            }
+            .glossary-llm-check-content {
+                margin-top: .65rem;
+                overflow-wrap: anywhere;
+            }
+            .glossary-llm-check-content h4 {
+                color: var(--ipcc-blue);
+                font-size: .98rem;
+                margin: .55rem 0 .35rem;
+            }
+            .glossary-llm-check-content p {
+                margin: .35rem 0;
+            }
+            .glossary-llm-check-content ul {
+                margin: .35rem 0 .5rem 1.25rem;
+                padding: 0;
+            }
+            .glossary-evidence-code.glossary-inline-evidence-code {
+                color: #0076a8;
+                cursor: pointer;
+                display: inline;
+                font: inherit;
+                margin: 0;
+                padding: 0;
+                text-decoration: underline;
+                text-decoration-thickness: 1px;
+                text-underline-offset: .14em;
+                vertical-align: baseline;
+            }
+            .glossary-evidence-code.glossary-inline-evidence-code:hover { color: #004f6a; }
+            .glossary-evidence-code.glossary-inline-evidence-code:focus-visible {
+                outline: 3px solid var(--ipcc-blue);
+                outline-offset: 2px;
+            }
             .glossary-evidence {
                 border-top: 1px solid var(--rule);
                 margin-top: 1rem;
@@ -413,6 +631,33 @@ GLOSSARY_CSS = """
                 .glossary-divider { display: none; }
                 .glossary-index-pane,
                 .glossary-detail-pane { height: min(60vh, 640px); }
+            }
+"""
+
+GLOSSARY_ISSUE_TABLE_CSS = """
+            .glossary-issue-overview { padding: clamp(1.25rem, 3vw, 3rem); }
+            .glossary-issue-wrap { overflow-x: auto; }
+            .glossary-issue-table {
+                border-collapse: collapse;
+                border-spacing: 0;
+                width: 100%;
+            }
+            .glossary-issue-table th,
+            .glossary-issue-table td {
+                border: 1px solid var(--rule);
+                padding: .6rem .7rem;
+                text-align: left;
+                vertical-align: top;
+            }
+            .glossary-issue-table th {
+                background: #f2f7f9;
+                color: var(--ipcc-blue);
+                font-weight: 800;
+                white-space: nowrap;
+            }
+            .glossary-issue-empty {
+                color: var(--muted);
+                margin: .2rem 0 0;
             }
 """
 
@@ -697,6 +942,230 @@ GLOSSARY_JAVASCRIPT = """
                     detail?.scrollIntoView({ behavior: "smooth", block: "nearest" });
                 };
 
+                const createInlineEvidenceButton = (sectionCode) => {
+                    const button = document.createElement("button");
+                    button.className = "glossary-evidence-code glossary-inline-evidence-code";
+                    button.type = "button";
+                    button.dataset.sectionCode = sectionCode;
+                    button.textContent = sectionCode;
+                    return button;
+                };
+
+                const splitIdentifiers = (text) => text
+                    .split(/\s*[;,]\s*/)
+                    .map((value) => value.trim())
+                    .filter(Boolean);
+
+                const identifierLooksLikeSectionCode = (value) => {
+                    if (!value || value.length > 64) return false;
+                    if (!/^[A-Za-z0-9][A-Za-z0-9 .:/+-]*$/.test(value)) return false;
+                    return /\\bP\\d+\\b/.test(value)
+                        || /\d/.test(value)
+                        || /^(SPM|TS|ES|Box|Figure|D-Figure|C-Figure)/.test(value);
+                };
+
+                const findEvidenceButton = (sectionCode) => {
+                    const activeDetail = details.find((detail) => !detail.hidden);
+                    const scope = activeDetail || panel;
+                    const primary = Array.from(scope.querySelectorAll("button.glossary-evidence-code:not(.glossary-inline-evidence-code)"));
+                    const fallback = Array.from(panel.querySelectorAll("button.glossary-evidence-code:not(.glossary-inline-evidence-code)"));
+                    const exact = primary.find((candidate) => candidate.textContent.trim() === sectionCode)
+                        || fallback.find((candidate) => candidate.textContent.trim() === sectionCode);
+                    if (exact) return exact;
+                    return primary.find((candidate) => candidate.textContent.trim().startsWith(`${sectionCode} `))
+                        || fallback.find((candidate) => candidate.textContent.trim().startsWith(`${sectionCode} `))
+                        || null;
+                };
+
+                const formatLegacyContextLists = () => {
+                    panel.querySelectorAll(".glossary-llm-check-content h4").forEach((heading) => {
+                        if (heading.textContent.trim().toLocaleLowerCase() !== "contexts of use") return;
+                        const contextList = heading.nextElementSibling;
+                        if (!contextList || contextList.tagName !== "UL") return;
+                        contextList.querySelectorAll(":scope > li").forEach((item) => {
+                            if (item.dataset.contextFormatted === "true") return;
+                            const title = item.querySelector(":scope > strong");
+                            const text = item.textContent.replace(/\s+/g, " ").trim();
+                            const sampleMarker = "Sample IDs:";
+                            const sampleIndex = text.indexOf(sampleMarker);
+                            if (!title) return;
+
+                            const titleText = title.textContent.trim().replace(/:\s*$/, "");
+                            let description = "";
+                            let identifiers = [];
+
+                            if (sampleIndex !== -1) {
+                                const beforeSamples = text.slice(0, sampleIndex).trim()
+                                    .replace(/\s+Reports:\s*[^.]+\.?$/i, "");
+                                description = beforeSamples.startsWith(title.textContent.trim())
+                                    ? beforeSamples.slice(title.textContent.trim().length).replace(/^:\s*/, "").trim()
+                                    : beforeSamples;
+                                identifiers = text.slice(sampleIndex + sampleMarker.length)
+                                    .replace(/\.$/, "")
+                                    .split(/\s*,\s*/)
+                                    .map((identifier) => identifier.trim())
+                                    .filter(Boolean);
+                            } else {
+                                const parenthesizedMatch = text.match(/^[^()]+\(([^)]+)\):\s*(.*)$/);
+                                if (!parenthesizedMatch) return;
+                                identifiers = splitIdentifiers(parenthesizedMatch[1]);
+                                description = parenthesizedMatch[2].trim();
+                            }
+
+                            identifiers = identifiers.filter(identifierLooksLikeSectionCode);
+                            if (!identifiers.length) return;
+
+                            item.replaceChildren();
+                            const strong = document.createElement("strong");
+                            strong.textContent = titleText;
+                            item.append(strong, document.createTextNode(" ("));
+                            identifiers.forEach((identifier, index) => {
+                                if (index) item.append(document.createTextNode(", "));
+                                item.append(createInlineEvidenceButton(identifier));
+                            });
+                            item.append(document.createTextNode(`): ${description}`));
+                            item.dataset.contextFormatted = "true";
+                        });
+                    });
+                };
+
+                const formatPotentialIssueEvidence = () => {
+                    panel.querySelectorAll(".glossary-llm-check-content h4").forEach((heading) => {
+                        const headingText = heading.textContent.trim().toLocaleLowerCase();
+                        if (!headingText.startsWith("potential issues")) return;
+                        const issueList = heading.nextElementSibling;
+                        if (!issueList || issueList.tagName !== "UL") return;
+                        issueList.querySelectorAll(":scope > li").forEach((item) => {
+                            if (item.dataset.issueFormatted === "true") return;
+                            if (item.querySelector(":scope > strong")) return;
+                            const text = item.textContent.replace(/\s+/g, " ").trim();
+
+                            const leadingMatch = text.match(/^\[([^\]]+)\]\s*(.*)$/);
+                            if (leadingMatch) {
+                                const sectionCode = leadingMatch[1].trim();
+                                if (!identifierLooksLikeSectionCode(sectionCode)) return;
+                                item.replaceChildren(createInlineEvidenceButton(sectionCode));
+                                if (leadingMatch[2]) {
+                                    item.append(document.createTextNode(` ${leadingMatch[2]}`));
+                                }
+                                item.dataset.issueFormatted = "true";
+                                return;
+                            }
+
+                            const structuredMatch = text.match(/^(.*?ID\(s\):\s*)\[([^\]]+)\](.*)$/i);
+                            if (!structuredMatch) return;
+                            const identifiers = splitIdentifiers(structuredMatch[2]).filter(identifierLooksLikeSectionCode);
+                            if (!identifiers.length) return;
+
+                            item.replaceChildren(document.createTextNode(structuredMatch[1]));
+                            identifiers.forEach((identifier, index) => {
+                                if (index) item.append(document.createTextNode(", "));
+                                item.append(createInlineEvidenceButton(identifier));
+                            });
+                            if (structuredMatch[3]) {
+                                item.append(document.createTextNode(structuredMatch[3]));
+                            }
+                            item.dataset.issueFormatted = "true";
+                        });
+                    });
+                };
+
+                const formatGlossaryNameRows = () => {
+                    details.forEach((detail) => {
+                        if (detail.querySelector(".glossary-canonical-term")) return;
+
+                        const heading = detail.querySelector(".glossary-detail-heading");
+                        const title = heading?.querySelector("h3");
+                        const totalCount = heading?.querySelector(".glossary-term-count");
+                        const aliases = detail.querySelector(".glossary-aliases");
+                        const names = [];
+                        let pendingText = "";
+
+                        const normalizeName = (name) => name.trim().toLocaleLowerCase();
+                        const evidenceMarks = Array.from(detail.querySelectorAll(".glossary-evidence mark"));
+                        const useCounts = new Map();
+                        evidenceMarks.forEach((mark) => {
+                            const name = normalizeName(mark.textContent || "");
+                            if (name) useCounts.set(name, (useCounts.get(name) || 0) + 1);
+                        });
+                        const nameUseCount = (name) => useCounts.get(normalizeName(name)) || 0;
+                        const totalUseCount = evidenceMarks.length;
+                        if (totalCount) totalCount.textContent = `[${totalUseCount}]`;
+                        const button = buttons.find((candidate) => candidate.dataset.detailId === detail.id);
+                        const buttonCount = button?.querySelector(".glossary-term-count");
+                        if (buttonCount) buttonCount.textContent = `[${totalUseCount}]`;
+                        const row = button?.closest(".glossary-term-row");
+                        if (row) row.dataset.usageCount = String(totalUseCount);
+                        const evidence = detail.querySelector(".glossary-evidence");
+                        const evidenceSummary = evidence?.querySelector("summary");
+                        if (evidenceSummary) {
+                            const sentenceRowCount = evidence.querySelectorAll("tbody > tr").length;
+                            const sentenceLabel = sentenceRowCount === 1 ? "sentence" : "sentences";
+                            const useLabel = totalUseCount === 1 ? "use" : "uses";
+                            evidenceSummary.textContent = `Term use overview table (${sentenceRowCount} ${sentenceLabel}; ${totalUseCount} ${useLabel})`;
+                        }
+
+                        aliases?.childNodes.forEach((node) => {
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                pendingText += node.textContent || "";
+                                return;
+                            }
+                            if (node.nodeType !== Node.ELEMENT_NODE
+                                || !node.classList.contains("glossary-term-count")) {
+                                pendingText += node.textContent || "";
+                                return;
+                            }
+
+                            const rawName = pendingText.trim();
+                            const name = rawName.startsWith("Also known as:")
+                                ? rawName.slice("Also known as:".length).trim()
+                                : rawName.startsWith(",")
+                                    ? rawName.slice(1).trim()
+                                    : rawName;
+                            if (name) names.push(name);
+                            pendingText = "";
+                        });
+
+                        const canonicalName = title?.textContent.trim();
+                        if (!canonicalName || !heading) return;
+
+                        const canonicalRow = document.createElement("p");
+                        canonicalRow.className = "glossary-canonical-term";
+                        const canonicalCount = document.createElement("span");
+                        canonicalCount.className = "glossary-term-count";
+                        canonicalCount.textContent = `[${nameUseCount(canonicalName)}]`;
+                        canonicalRow.append(
+                            document.createTextNode("Canonical term: "),
+                            document.createTextNode(`${canonicalName} `),
+                            canonicalCount,
+                        );
+
+                        const aliasRow = aliases || document.createElement("p");
+                        aliasRow.className = "glossary-aliases";
+                        aliasRow.replaceChildren(document.createTextNode("Alias(es): "));
+                        if (names.length) {
+                            names.forEach((name, index) => {
+                                if (index) aliasRow.append(document.createTextNode(", "));
+                                const aliasCount = document.createElement("span");
+                                aliasCount.className = "glossary-term-count";
+                                aliasCount.textContent = `[${nameUseCount(name)}]`;
+                                aliasRow.append(
+                                    document.createTextNode(`${name} `),
+                                    aliasCount,
+                                );
+                            });
+                        } else {
+                            aliasRow.append(document.createTextNode("None"));
+                        }
+
+                        if (aliases) {
+                            aliases.before(canonicalRow);
+                        } else {
+                            heading.after(canonicalRow, aliasRow);
+                        }
+                    });
+                };
+
                 const setDividerPosition = (percentage) => {
                     const constrained = Math.round(Math.min(60, Math.max(20, percentage)) * 10) / 10;
                     workspace?.style.setProperty("--glossary-index-width", `${constrained}%`);
@@ -742,6 +1211,33 @@ GLOSSARY_JAVASCRIPT = """
                 });
                 buttons.forEach((button) => button.addEventListener("click", () => showTerm(button)));
                 document.addEventListener("click", (event) => {
+                    const inlineReferenceButton = event.target.closest("button.glossary-inline-evidence-code");
+                    if (inlineReferenceButton && paragraphDialog && paragraphDialogTitle && paragraphDialogLocation && paragraphDialogText) {
+                        const sectionCode = inlineReferenceButton.dataset.sectionCode || inlineReferenceButton.textContent.trim();
+                        const evidenceButton = findEvidenceButton(sectionCode);
+                        if (!evidenceButton) {
+                            return;
+                        }
+
+                        const nodeId = evidenceButton.dataset.sourceNodeId;
+                        const nodeIdAttribute = ["data", "node", "id"].join("-");
+                        const sourceNode = nodeId
+                            ? document.querySelector(`[${nodeIdAttribute}="${CSS.escape(nodeId)}"]`)
+                            : null;
+                        const sourceContent = sourceNode?.querySelector(".paragraph, .figure-explanation");
+                        if (!sourceContent) {
+                            return;
+                        }
+                        const sourceClone = sourceContent.cloneNode(true);
+                        sourceClone.querySelectorAll(".node-code, .back-to-top").forEach((element) => element.remove());
+                        paragraphDialogTitle.textContent = sectionCode;
+                        paragraphDialogLocation.textContent = evidenceButton.closest("td")
+                            ?.querySelector(".glossary-evidence-location")?.textContent || "";
+                        paragraphDialogText.textContent = sourceClone.textContent.trim().replace(/\s+/g, " ");
+                        paragraphDialog.showModal();
+                        return;
+                    }
+
                     const codeButton = event.target.closest("button.glossary-evidence-code");
                     if (codeButton && paragraphDialog && paragraphDialogTitle && paragraphDialogLocation && paragraphDialogText) {
                         const nodeId = codeButton.dataset.sourceNodeId;
@@ -768,8 +1264,9 @@ GLOSSARY_JAVASCRIPT = """
                     if (!sourceDetail) return;
                     dialogTitle.textContent = link.dataset.term;
                     dialogContent.replaceChildren();
-                    const parent = sourceDetail.querySelector(".glossary-parent");
-                    if (parent) dialogContent.append(parent.cloneNode(true));
+                    sourceDetail.querySelectorAll(".glossary-canonical-term, .glossary-aliases, .glossary-parent, .glossary-child").forEach((detail) => {
+                        dialogContent.append(detail.cloneNode(true));
+                    });
                     sourceDetail.querySelectorAll(".glossary-definition").forEach((definition) => {
                         dialogContent.append(definition.cloneNode(true));
                     });
@@ -783,6 +1280,9 @@ GLOSSARY_JAVASCRIPT = """
                 paragraphDialog?.addEventListener("click", (event) => {
                     if (event.target === paragraphDialog) paragraphDialog.close();
                 });
+                formatGlossaryNameRows();
+                formatLegacyContextLists();
+                formatPotentialIssueEvidence();
                 filterTerms();
 
                 const hashDetail = window.location.hash ? document.getElementById(window.location.hash.slice(1)) : null;
@@ -1009,6 +1509,72 @@ def report_node_codes(markup: str) -> dict[str, str]:
     return parser.codes
 
 
+def is_word_character(character: str) -> bool:
+    """Return whether a character prevents a boundary-safe term match."""
+    return character.isalnum() or character == "_"
+
+
+def glossary_name_matches(
+    text: str,
+    match_map: GlossaryMatchMap,
+    term_pattern: re.Pattern[str] | None,
+) -> list[tuple[int, int, str, tuple[str, ...]]]:
+    """Find boundary-safe canonical terms and revised aliases in source text."""
+    if term_pattern is None:
+        return []
+
+    matches = []
+    for match in term_pattern.finditer(text):
+        start, end = match.span()
+        matched_name = match.group(0)
+        if matched_name and matched_name[0].isalnum() and start > 0 and is_word_character(text[start - 1]):
+            continue
+        if matched_name and matched_name[-1].isalnum() and end < len(text) and is_word_character(text[end]):
+            continue
+
+        owner_keys = match_map.get(normalize_text(matched_name).casefold(), ())
+        if owner_keys:
+            matches.append((start, end, matched_name, owner_keys))
+    return matches
+
+
+def linkify_revised_glossary_terms(
+    text: str,
+    glossary: RevisedGlossary,
+    match_map: GlossaryMatchMap,
+    term_pattern: re.Pattern[str] | None,
+) -> str:
+    """Link unambiguous canonical terms and aliases to their canonical detail panel."""
+    if not glossary or term_pattern is None:
+        return html.escape(text)
+
+    output_parts: list[str] = []
+    last_end = 0
+    for start, end, matched_name, owner_keys in glossary_name_matches(text, match_map, term_pattern):
+        name_key = normalize_text(matched_name).casefold()
+        canonical_owners = [
+            owner_key
+            for owner_key in owner_keys
+            if glossary[owner_key].term.casefold() == name_key
+        ]
+        if len(canonical_owners) == 1:
+            owner_key = canonical_owners[0]
+        elif len(owner_keys) == 1:
+            owner_key = owner_keys[0]
+        else:
+            continue
+
+        output_parts.append(html.escape(text[last_end:start]))
+        output_parts.append(
+            f'<a href="#" data-term="{html.escape(glossary[owner_key].term, quote=True)}">'
+            f"{html.escape(matched_name)}</a>"
+        )
+        last_end = end
+
+    output_parts.append(html.escape(text[last_end:]))
+    return "".join(output_parts)
+
+
 class GlossaryMarkupLinker(HTMLParser):
     """Link glossary terms in narrative report text while preserving source markup."""
 
@@ -1017,12 +1583,19 @@ class GlossaryMarkupLinker(HTMLParser):
     PROTECTED_CLASSES = {"node-code", "source-reference"}
     LINKABLE_CLASSES = {"paragraph", "figure-explanation"}
 
-    def __init__(self, markup: str, glossary: Glossary, excluded_root_ids: set[str]) -> None:
+    def __init__(
+        self,
+        markup: str,
+        glossary: RevisedGlossary,
+        match_map: GlossaryMatchMap,
+        excluded_root_ids: set[str],
+    ) -> None:
         super().__init__(convert_charrefs=False)
         self.markup = markup
         self.glossary = glossary
+        self.match_map = match_map
         self.excluded_root_ids = excluded_root_ids
-        self.term_pattern = build_glossary_pattern(glossary)
+        self.term_pattern = build_glossary_match_pattern(match_map)
         self.line_offsets = [0]
         self.line_offsets.extend(match.end() for match in re.finditer("\n", markup))
         self.states: list[tuple[bool, bool]] = [(False, False)]
@@ -1060,7 +1633,12 @@ class GlossaryMarkupLinker(HTMLParser):
         linkable, protected = self.states[-1]
         if not linkable or protected or not data.strip():
             return
-        linked_text = linkify_glossary_terms(data, self.glossary, self.term_pattern)
+        linked_text = linkify_revised_glossary_terms(
+            data,
+            self.glossary,
+            self.match_map,
+            self.term_pattern,
+        )
         if 'data-term="' not in linked_text:
             return
         linked_text = linked_text.replace(
@@ -1077,9 +1655,14 @@ class GlossaryMarkupLinker(HTMLParser):
         return linked_markup
 
 
-def linkify_report_markup(markup: str, glossary: Glossary, excluded_root_ids: set[str]) -> str:
+def linkify_report_markup(
+    markup: str,
+    glossary: RevisedGlossary,
+    match_map: GlossaryMatchMap,
+    excluded_root_ids: set[str],
+) -> str:
     """Make glossary terms clickable in eligible paragraphs and figure explanations."""
-    parser = GlossaryMarkupLinker(markup, glossary, excluded_root_ids)
+    parser = GlossaryMarkupLinker(markup, glossary, match_map, excluded_root_ids)
     parser.feed(markup)
     parser.close()
     return parser.result()
@@ -1163,28 +1746,17 @@ def canonical_report_data(payload: dict[str, Any]) -> tuple[list[str], Counter[s
     return [root_ids_by_key[key] for key in REPORT_ORDER], node_ids, figure_count
 
 
-def glossary_keys_in_text(
+def glossary_matches_by_term(
     text: str,
-    glossary: Glossary,
+    match_map: GlossaryMatchMap,
     term_pattern: re.Pattern[str] | None,
-) -> set[str]:
-    """Return boundary-safe glossary keys found in one sentence."""
-    if term_pattern is None:
-        return set()
-
-    matched_keys: set[str] = set()
-    for match in term_pattern.finditer(text):
-        start, end = match.span()
-        matched_text = match.group(0)
-        term_key = matched_text.casefold()
-        if term_key not in glossary:
-            continue
-        if matched_text[0].isalnum() and start > 0 and (text[start - 1].isalnum() or text[start - 1] == "_"):
-            continue
-        if matched_text[-1].isalnum() and end < len(text) and (text[end].isalnum() or text[end] == "_"):
-            continue
-        matched_keys.add(term_key)
-    return matched_keys
+) -> dict[str, tuple[str, ...]]:
+    """Group every boundary-safe canonical-term or alias match by its canonical term."""
+    matches_by_term: dict[str, list[str]] = {}
+    for _, _, matched_name, owner_keys in glossary_name_matches(text, match_map, term_pattern):
+        for owner_key in owner_keys:
+            matches_by_term.setdefault(owner_key, []).append(matched_name)
+    return {owner_key: tuple(matched_names) for owner_key, matched_names in matches_by_term.items()}
 
 
 def excludes_glossary_occurrences(node: dict[str, Any]) -> bool:
@@ -1329,7 +1901,8 @@ def full_report_cae_check(payload: dict[str, Any], node_codes: dict[str, str]) -
 
 def full_report_term_occurrences(
     payload: dict[str, Any],
-    glossary: Glossary,
+    glossary: RevisedGlossary,
+    match_map: GlossaryMatchMap,
     node_codes: dict[str, str],
 ) -> GlossaryOccurrences:
     """Find glossary terms in report content outside references and supplements."""
@@ -1338,7 +1911,7 @@ def full_report_term_occurrences(
         raise ValueError("Inspection JSON must contain a reports list.")
 
     occurrences: GlossaryOccurrences = {term_key: [] for term_key in glossary}
-    term_pattern = build_glossary_pattern(glossary)
+    term_pattern = build_glossary_match_pattern(match_map)
 
     def scan_node(node: dict[str, Any], source_name: str) -> None:
         if excludes_glossary_occurrences(node):
@@ -1356,8 +1929,21 @@ def full_report_term_occurrences(
                 sentence = sentence.strip()
                 if not sentence:
                     continue
-                for term_key in glossary_keys_in_text(sentence, glossary, term_pattern):
-                    occurrences[term_key].append((source_label, node_codes[node_id], node_id, sentence, text))
+                for term_key, matched_names in glossary_matches_by_term(
+                    sentence,
+                    match_map,
+                    term_pattern,
+                ).items():
+                    occurrences[term_key].append(
+                        GlossaryOccurrence(
+                            source_label,
+                            node_codes[node_id],
+                            node_id,
+                            sentence,
+                            text,
+                            matched_names,
+                        )
+                    )
         for child in node.get("children", []):
             if isinstance(child, dict):
                 scan_node(child, source_name)
@@ -1372,6 +1958,218 @@ def full_report_term_occurrences(
         scan_node(tree, report_key(title))
 
     return occurrences
+
+
+def strip_markdown_inline(text: str) -> str:
+    """Remove lightweight markdown markers from one summary line."""
+    cleaned = re.sub(r"[*_`]+", "", text or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def markdown_bullet_parts(line: str) -> tuple[int, str] | None:
+    """Return indentation and content for one Markdown bullet line."""
+    match = MARKDOWN_BULLET_RE.match(line)
+    if match is None:
+        return None
+    indentation = len(match.group("indent").expandtabs(4))
+    return indentation, match.group("content").strip()
+
+
+def load_term_usage_summaries(summary_path: Path) -> dict[str, str]:
+    """Load precomputed term summaries keyed by glossary term key."""
+    if not summary_path.is_file():
+        return {}
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return {}
+    records = payload.get("summaries")
+    if not isinstance(records, dict):
+        return {}
+
+    summaries: dict[str, str] = {}
+    for term_key, record in records.items():
+        if not isinstance(term_key, str) or not isinstance(record, dict):
+            continue
+        summary = record.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            summaries[term_key.casefold()] = summary
+    return summaries
+
+
+def summary_issue_section(summary: str) -> str:
+    """Extract the Potential issues section body from a markdown summary."""
+    match = POTENTIAL_ISSUES_SECTION_RE.search(summary or "")
+    return match.group("content") if match else ""
+
+
+def summary_has_potential_issue(summary: str) -> bool:
+    """Return whether a summary reports a potential consistency issue."""
+    content = summary_issue_section(summary)
+    if not content:
+        return False
+
+    bullet_lines = [
+        strip_markdown_inline(bullet_content)
+        for line in content.splitlines()
+        if (bullet := markdown_bullet_parts(line)) is not None
+        for _, bullet_content in [bullet]
+    ]
+    if not bullet_lines:
+        text = strip_markdown_inline(content)
+        return bool(text) and NO_POTENTIAL_ISSUE_RE.match(text) is None
+
+    verdict = bullet_lines[0].casefold()
+    if verdict.startswith("inconsistency identified"):
+        return True
+    if verdict.startswith("consistency identified"):
+        return False
+
+    if all(NO_POTENTIAL_ISSUE_RE.match(line) for line in bullet_lines if line):
+        return False
+    return True
+
+
+def parse_issue_rows_for_term(term: str, summary: str) -> list[GlossaryIssueRow]:
+    """Parse issue-table rows from a term's Potential issues section."""
+    content = summary_issue_section(summary)
+    if not content:
+        return []
+
+    bullets = [
+        bullet_content
+        for line in content.splitlines()
+        if (bullet := markdown_bullet_parts(line)) is not None
+        for _, bullet_content in [bullet]
+    ]
+    if not bullets:
+        return []
+
+    first = strip_markdown_inline(bullets[0]).casefold()
+    if first.startswith("consistency identified"):
+        return []
+
+    rows: list[GlossaryIssueRow] = []
+    current_issue = "Potential issue"
+    structured_re = re.compile(
+        r"Issue\s+type:\s*(?P<kind>[^;]+);\s*"
+        r"ID\(s\):\s*\[(?P<ids>[^\]]*)\];\s*"
+        r"Quote:\s*\"(?P<quote>[^\"]*)\";\s*"
+        r"Why\s+conflicting:\s*(?P<why>.*)",
+        re.IGNORECASE,
+    )
+    evidence_re = re.compile(r"\[(?P<section>[^\]]+)\]\s*\"?(?P<quote>.*?)(?:\"\s*)?$")
+
+    for raw_bullet in bullets[1:]:
+        cleaned = strip_markdown_inline(raw_bullet)
+        if not cleaned:
+            continue
+        if NO_POTENTIAL_ISSUE_RE.match(cleaned):
+            continue
+
+        structured_match = structured_re.match(cleaned)
+        if structured_match:
+            issue_text = cleaned
+            quote = strip_markdown_inline(structured_match.group("quote"))
+            identifiers = [item.strip() for item in structured_match.group("ids").split(",") if item.strip()]
+            if not identifiers:
+                identifiers = [""]
+            for identifier in identifiers:
+                rows.append(
+                    GlossaryIssueRow(
+                        section=identifier,
+                        sentence=quote,
+                        term=term,
+                        issue=issue_text,
+                    )
+                )
+            current_issue = issue_text or current_issue
+            continue
+
+        evidence_match = evidence_re.match(cleaned)
+        if evidence_match:
+            rows.append(
+                GlossaryIssueRow(
+                    section=strip_markdown_inline(evidence_match.group("section")),
+                    sentence=strip_markdown_inline(evidence_match.group("quote")),
+                    term=term,
+                    issue=current_issue,
+                )
+            )
+            continue
+
+        current_issue = cleaned
+
+    if rows:
+        return rows
+
+    if first.startswith("inconsistency identified"):
+        return [GlossaryIssueRow(section="", sentence="", term=term, issue="Inconsistency identified")]
+    return []
+
+
+def build_glossary_issue_rows(
+    glossary: RevisedGlossary,
+    term_usage_summaries: dict[str, str],
+) -> tuple[set[str], list[GlossaryIssueRow]]:
+    """Return term keys with issues and table rows derived from term summaries."""
+    terms_with_issues: set[str] = set()
+    rows: list[GlossaryIssueRow] = []
+
+    for term_key, entry in glossary.items():
+        summary = term_usage_summaries.get(term_key)
+        if not summary or not summary_has_potential_issue(summary):
+            continue
+        terms_with_issues.add(term_key)
+        rows.extend(parse_issue_rows_for_term(entry.term, summary))
+
+    rows.sort(key=lambda item: (item.section.casefold(), item.term.casefold(), item.issue.casefold(), item.sentence.casefold()))
+    return terms_with_issues, rows
+
+
+def build_section_node_lookup(node_codes: dict[str, str]) -> dict[str, str]:
+    """Map visible section code to source node id for clickable issue-table links."""
+    lookup: dict[str, str] = {}
+    for node_id, node_code in node_codes.items():
+        key = normalize_text(node_code)
+        if key and key not in lookup:
+            lookup[key] = node_id
+    return lookup
+
+
+def build_section_source_label_lookup(occurrences: GlossaryOccurrences) -> dict[str, str]:
+    """Map section code to a representative source label."""
+    labels: dict[str, str] = {}
+    for matches in occurrences.values():
+        for item in matches:
+            key = normalize_text(item.node_code)
+            if key and key not in labels:
+                labels[key] = item.source_label
+    return labels
+
+
+def enrich_glossary_issue_rows(
+    rows: list[GlossaryIssueRow],
+    section_node_lookup: dict[str, str],
+    section_source_lookup: dict[str, str],
+) -> list[GlossaryIssueRow]:
+    """Attach node ids and source labels to parsed issue rows for clickable rendering."""
+    enriched: list[GlossaryIssueRow] = []
+    for row in rows:
+        section_key = normalize_text(row.section)
+        node_id = section_node_lookup.get(section_key, "")
+        source_label = section_source_lookup.get(section_key, "")
+        enriched.append(
+            GlossaryIssueRow(
+                section=row.section,
+                sentence=row.sentence,
+                term=row.term,
+                issue=row.issue,
+                node_id=node_id,
+                source_label=source_label,
+            )
+        )
+    return enriched
 
 
 def document_id_from_panel(markup: str) -> str:
@@ -1604,7 +2402,7 @@ def render_cae_panel(result: CaeCheckResult) -> str:
         f'data-pair-count="{result.valid_pair_count}" data-confidence-count="{result.confidence_count}" '
         f'data-issue-count="{len(result.issues)}">'
         "<header>"
-        '<h1>Confidence, Agreement, and Evidence check'
+        '<h1>Confidence, Agreement, and Evidence check (WGII TSU)'
         '<button class="back-to-top" type="button" aria-label="Back to top" '
         'title="Back to top">&#8593;</button></h1>'
         f'<p class="facts" aria-live="polite">{result.valid_count} valid sentence-final assessments; '
@@ -1632,86 +2430,442 @@ def render_cae_panel(result: CaeCheckResult) -> str:
     )
 
 
-def render_glossary_evidence(term: str, matches: list[GlossaryOccurrence]) -> str:
+def highlight_glossary_matches(text: str, matched_names: tuple[str, ...]) -> str:
+    """Escape an evidence sentence and highlight its canonical-term or alias matches."""
+    names = tuple(dict.fromkeys(name.casefold() for name in matched_names))
+    if not names:
+        return html.escape(text)
+    pattern = re.compile(
+        r"(?<!\w)(?:" + "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True)) + r")(?!\w)",
+        re.IGNORECASE,
+    )
+    output_parts: list[str] = []
+    last_end = 0
+    for match in pattern.finditer(text):
+        output_parts.append(html.escape(text[last_end : match.start()]))
+        output_parts.append(f"<mark>{html.escape(match.group(0))}</mark>")
+        last_end = match.end()
+    output_parts.append(html.escape(text[last_end:]))
+    return "".join(output_parts)
+
+
+def render_glossary_evidence(matches: list[GlossaryOccurrence]) -> str:
     """Render section and sentence evidence without LLM content."""
     if not matches:
-        return '<p class="glossary-result-count">No usage found in the SPM or Executive Summaries.</p>'
+        return '<p class="glossary-result-count">No usage found in the report body.</p>'
 
+    use_count = sum(len(occurrence.matched_names) for occurrence in matches)
     rows = [
         '<details class="glossary-evidence">',
-        f"<summary>Section / Sentence table ({len(matches)})</summary>",
+        f"<summary>Term use overview table ({len(matches)} {'sentence' if len(matches) == 1 else 'sentences'}; {use_count} {'use' if use_count == 1 else 'uses'})</summary>",
         "<table>",
         "<thead><tr><th>Section</th><th>Sentence</th></tr></thead>",
         "<tbody>",
     ]
-    for source_label, node_code, node_id, sentence, _ in matches:
+    for occurrence in matches:
         rows.append(
             "<tr>"
             '<td><span class="glossary-evidence-location">'
-            f"{html.escape(source_label)}</span>"
+            f"{html.escape(occurrence.source_label)}</span>"
             '<button class="glossary-evidence-code" type="button" '
-            f'data-source-node-id="{html.escape(node_id, quote=True)}">{html.escape(node_code)}</button></td>'
-            f"<td>{highlight_term(sentence, term)}</td>"
+            f'data-source-node-id="{html.escape(occurrence.node_id, quote=True)}">'
+            f"{html.escape(occurrence.node_code)}</button></td>"
+            f"<td>{highlight_glossary_matches(occurrence.sentence, occurrence.matched_names)}</td>"
             "</tr>"
         )
     rows.extend(["</tbody>", "</table>", "</details>"])
     return "".join(rows)
 
 
+def render_summary_inline_markdown(
+    text: str,
+    available_section_codes: set[str] | None = None,
+) -> str:
+    """Render a minimal inline markdown subset used in generated summaries."""
+    placeholders: list[str] = []
+
+    def is_probable_section_code(value: str) -> bool:
+        token = normalize_text(value)
+        if not token or len(token) > 64:
+            return False
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .:/+-]*", token):
+            return False
+        return bool(
+            re.search(r"\bP\d+\b", token)
+            or re.search(r"\d", token)
+            or token.startswith(("SPM", "TS", "ES", "Box", "Figure", "D-Figure", "C-Figure"))
+        )
+
+    def split_section_codes(label: str) -> list[str]:
+        candidates = [normalize_text(part) for part in re.split(r"\s*[;,]\s*", label) if normalize_text(part)]
+        if not candidates:
+            return []
+        if all(is_probable_section_code(item) for item in candidates):
+            return candidates
+        if is_probable_section_code(label):
+            return [normalize_text(label)]
+        return []
+
+    def add_button_placeholder(section_code: str) -> str:
+        if available_section_codes is not None and section_code not in available_section_codes:
+            return section_code
+        token = f"@@LINK{len(placeholders)}@@"
+        escaped_label = html.escape(section_code)
+        section_attr = html.escape(section_code, quote=True)
+        placeholders.append(
+            '<button class="glossary-evidence-code glossary-inline-evidence-code" type="button" '
+            f'data-section-code="{section_attr}">{escaped_label}</button>'
+        )
+        return token
+
+    def replace_link(match: re.Match[str]) -> str:
+        label = normalize_text(match.group("label"))
+        if not label:
+            return match.group(0)
+        return add_button_placeholder(label)
+
+    text_with_tokens = re.sub(
+        r"\[(?P<label>[^\]]+)\]\((?P<url>https?://[^)\s]+)\)",
+        replace_link,
+        text,
+    )
+
+    def replace_section_brackets(match: re.Match[str]) -> str:
+        section_codes = split_section_codes(match.group("label"))
+        if not section_codes:
+            return match.group(0)
+        return ", ".join(add_button_placeholder(code) for code in section_codes)
+
+    text_with_tokens = re.sub(
+        r"\[(?P<label>[^\]\n]+)\]",
+        replace_section_brackets,
+        text_with_tokens,
+    )
+
+    escaped = html.escape(text_with_tokens)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"\*(.+?)\*", r"<em>\1</em>", escaped)
+    for index, link_html in enumerate(placeholders):
+        escaped = escaped.replace(f"@@LINK{index}@@", link_html)
+    return escaped
+
+
+def strip_usage_summary_section(summary: str) -> str:
+    """Remove Usage summary blocks from legacy term summaries before rendering."""
+    return re.sub(
+        r"(?ims)^#{3,4}\s*usage\s+summary\s*$.*?(?=^#{3,4}\s+|\Z)",
+        "",
+        summary,
+    ).strip()
+
+
+def strip_glossary_alignment_section(summary: str) -> str:
+    """Remove Glossary alignment blocks from legacy term summaries before rendering."""
+    return re.sub(
+        r"(?ims)^#{3,4}\s*glossary\s+alignment\s*$.*?(?=^#{3,4}\s+|\Z)",
+        "",
+        summary,
+    ).strip()
+
+
+def render_summary_markdown_lines(
+    lines: list[str],
+    available_section_codes: set[str] | None = None,
+) -> str:
+    """Render one non-heading summary section with flat Markdown bullets."""
+    parts: list[str] = []
+    in_list = False
+
+    def close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            parts.append("</ul>")
+            in_list = False
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            close_list()
+            continue
+
+        bullet = markdown_bullet_parts(raw_line)
+        if bullet is not None:
+            if not in_list:
+                parts.append("<ul>")
+                in_list = True
+            parts.append(
+                f"<li>{render_summary_inline_markdown(bullet[1], available_section_codes)}</li>"
+            )
+            continue
+
+        close_list()
+        parts.append(f"<p>{render_summary_inline_markdown(line, available_section_codes)}</p>")
+
+    close_list()
+    return "".join(parts)
+
+
+def render_potential_issue_markdown_lines(
+    lines: list[str],
+    available_section_codes: set[str] | None = None,
+) -> str:
+    """Render issue evidence as nested list items beneath its parent issue."""
+    parts: list[str] = []
+    in_issue_list = False
+    in_issue_item = False
+    in_evidence_list = False
+
+    def open_issue_list() -> None:
+        nonlocal in_issue_list
+        if not in_issue_list:
+            parts.append("<ul>")
+            in_issue_list = True
+
+    def close_issue_item() -> None:
+        nonlocal in_issue_item, in_evidence_list
+        if in_evidence_list:
+            parts.append("</ul>")
+            in_evidence_list = False
+        if in_issue_item:
+            parts.append("</li>")
+            in_issue_item = False
+
+    def close_issue_list() -> None:
+        nonlocal in_issue_list
+        close_issue_item()
+        if in_issue_list:
+            parts.append("</ul>")
+            in_issue_list = False
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        bullet = markdown_bullet_parts(raw_line)
+        if bullet is None:
+            close_issue_list()
+            parts.append(f"<p>{render_summary_inline_markdown(line, available_section_codes)}</p>")
+            continue
+
+        indentation, bullet_content = bullet
+        is_evidence = indentation > 0 or POTENTIAL_ISSUE_EVIDENCE_RE.match(bullet_content) is not None
+        open_issue_list()
+        if is_evidence and in_issue_item:
+            if not in_evidence_list:
+                parts.append("<ul>")
+                in_evidence_list = True
+            parts.append(
+                f"<li>{render_summary_inline_markdown(bullet_content, available_section_codes)}</li>"
+            )
+            continue
+
+        close_issue_item()
+        if is_evidence:
+            parts.append(
+                f"<li>{render_summary_inline_markdown(bullet_content, available_section_codes)}</li>"
+            )
+            continue
+
+        parts.append(f"<li>{render_summary_inline_markdown(bullet_content, available_section_codes)}")
+        in_issue_item = True
+
+    close_issue_list()
+    return "".join(parts)
+
+
+def render_summary_markdown_block(
+    summary: str,
+    available_section_codes: set[str] | None = None,
+) -> str:
+    """Render summary markdown (### headings, bullets, paragraphs) to safe HTML."""
+    summary = strip_usage_summary_section(summary)
+    summary = strip_glossary_alignment_section(summary)
+    parts: list[str] = []
+    heading: str | None = None
+    section_lines: list[str] = []
+
+    def flush_section() -> None:
+        nonlocal section_lines
+        rendered_heading = heading
+        if rendered_heading is not None:
+            heading_key = rendered_heading.casefold()
+            if heading_key.startswith("contexts of use"):
+                rendered_heading = LLM_CONTEXTS_HEADING
+            elif heading_key.startswith("potential issues"):
+                rendered_heading = LLM_POTENTIAL_ISSUES_HEADING
+            elif heading_key == "conclusion":
+                rendered_heading = LLM_CONCLUSION_HEADING
+        if heading is not None:
+            parts.append(f"<h4>{render_summary_inline_markdown(rendered_heading, available_section_codes)}</h4>")
+        if heading is not None and rendered_heading == LLM_POTENTIAL_ISSUES_HEADING:
+            parts.append(render_potential_issue_markdown_lines(section_lines, available_section_codes))
+        else:
+            parts.append(render_summary_markdown_lines(section_lines, available_section_codes))
+        section_lines = []
+
+    for raw_line in summary.splitlines():
+        line = raw_line.strip()
+        if line.startswith("### "):
+            flush_section()
+            heading = line[4:].strip()
+            continue
+        section_lines.append(raw_line)
+
+    flush_section()
+    return "".join(parts)
+
+
+def render_glossary_llm_check(
+    term_key: str,
+    term_usage_summaries: dict[str, str],
+    available_section_codes: set[str],
+) -> str:
+    """Render one foldable LLM consistency check block for a glossary term."""
+    summary = term_usage_summaries.get(term_key, "").strip()
+    if not summary:
+        summary = "LLM analysis has not been run yet."
+    callout_text = (
+        "This LLM-assisted summary, including the potential inconsistency flags, "
+        "is provided only as a reference. It may contain errors and it is not intended "
+        "to replace the human judgment for consistency checks."
+    )
+    return (
+        '<details class="glossary-llm-check">'
+        "<summary>LLM-assisted consistency check</summary>"
+        '<p class="glossary-llm-check-notebar" role="note" aria-label="LLM summary caution">'
+        '<span class="glossary-llm-check-eye" aria-hidden="true">⚠️</span>'
+        f'<span class="glossary-llm-check-note">{html.escape(callout_text)}</span>'
+        '</p>'
+        '<div class="glossary-llm-check-content">'
+        f"{render_summary_markdown_block(summary, available_section_codes)}"
+        "</div>"
+        "</details>"
+    )
+
+
+def highlight_issue_sentence(sentence: str, term: str) -> str:
+    """Highlight the canonical term inside one issue-table sentence."""
+    if not sentence:
+        return ""
+    pattern = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", re.IGNORECASE)
+    output_parts: list[str] = []
+    last_end = 0
+    for match in pattern.finditer(sentence):
+        output_parts.append(html.escape(sentence[last_end : match.start()]))
+        output_parts.append(f"<mark>{html.escape(match.group(0))}</mark>")
+        last_end = match.end()
+    output_parts.append(html.escape(sentence[last_end:]))
+    return "".join(output_parts)
+
+
 def render_glossary_panel(
-    glossary: Glossary,
+    glossary: RevisedGlossary,
     occurrences: GlossaryOccurrences,
+    terms_with_issues: set[str],
+    term_usage_summaries: dict[str, str],
 ) -> tuple[str, int]:
-    """Render the Streamlit Glossary Overview workflow as a static tab panel."""
-    usage_counts = {term_key: len(matches) for term_key, matches in occurrences.items()}
+    """Render the AO glossary overview as a static tab panel."""
+    usage_counts = {
+        term_key: sum(len(occurrence.matched_names) for occurrence in matches)
+        for term_key, matches in occurrences.items()
+    }
+    available_section_codes: set[str] = set()
+    for matches in occurrences.values():
+        for occurrence in matches:
+            section_code = normalize_text(occurrence.node_code)
+            if section_code:
+                available_section_codes.add(section_code)
     used_term_count = sum(count > 0 for count in usage_counts.values())
-    ordered_definitions = sorted(glossary.values(), key=lambda entries: entries[0][0].casefold())
+    ordered_entries = sorted(glossary.values(), key=lambda entry: entry.term.casefold())
 
     term_rows: list[str] = []
     detail_panels: list[str] = []
-    for index, definitions in enumerate(ordered_definitions, start=1):
-        term = definitions[0][0]
+    for index, entry in enumerate(ordered_entries, start=1):
+        term = entry.term
         term_key = term.casefold()
         frequency = usage_counts[term_key]
-        sources = glossary_source_label(definitions)
+        search_terms = " ".join((term, *entry.aliases)).casefold()
         detail_id = f"glossary-term-detail-{index}"
         disabled = " disabled" if frequency == 0 else ""
         detail_attribute = f' data-detail-id="{detail_id}"' if frequency else ""
+        issue_indicator = (
+            '<span class="glossary-term-issue" role="img" '
+            'aria-label="Potential issue needing substantive review" '
+            'title="Potential issue needing substantive review">!</span>'
+            if term_key in terms_with_issues
+            else ""
+        )
         term_rows.append(
-            f'<li class="glossary-term-row" data-search="{html.escape(term_key, quote=True)}" '
+            f'<li class="glossary-term-row" data-search="{html.escape(search_terms, quote=True)}" '
             f'data-usage-count="{frequency}">'
             f'<button class="glossary-term-button" type="button" aria-pressed="false"{detail_attribute}{disabled}>'
             f"&#8226; {html.escape(term)} "
             f'<span class="glossary-term-count">[{frequency}]</span> '
-            f'<span class="glossary-term-source">[{html.escape(sources)}]</span>'
+            f'<span class="glossary-term-source">[{html.escape(entry.source)}]</span>'
+            f"{issue_indicator}"
             "</button>"
             "</li>"
         )
         if not frequency:
             continue
 
-        parent = glossary_parent_label(definitions)
-        parent_markup = f'<p class="glossary-parent">Parent: {html.escape(parent)}</p>' if parent else ""
-        definition_markup = []
-        for _, definition, _, source in definitions:
-            definition_markup.append(
-                '<section class="glossary-definition">'
-                f"<h4>Explanation in {html.escape(source)}</h4>"
-                f"<p>{html.escape(definition)}</p>"
-                "</section>"
-            )
         matches = occurrences[term_key]
+        alias_usage_counts = Counter(
+            matched_name.casefold()
+            for occurrence in matches
+            for matched_name in occurrence.matched_names
+        )
+        canonical_name = term
+        canonical_count = alias_usage_counts[canonical_name.casefold()]
+        alias_names = entry.aliases
+        canonical_markup = (
+            '<p class="glossary-canonical-term">Canonical term: '
+            f'{html.escape(canonical_name)} '
+            f'<span class="glossary-term-count">[{canonical_count}]</span>'
+            "</p>"
+        )
+        alias_items = ", ".join(
+            f'{html.escape(alias)} <span class="glossary-term-count">'
+            f'[{alias_usage_counts[alias.casefold()]}]</span>'
+            for alias in alias_names
+        )
+        aliases_markup = (
+            f'<p class="glossary-aliases">Alias(es): {alias_items}</p>'
+            if alias_items
+            else '<p class="glossary-aliases">Alias(es): None</p>'
+        )
+        parent_markup = (
+            f'<p class="glossary-parent">Parent terms: {html.escape("; ".join(entry.parent_terms))}</p>'
+            if entry.parent_terms
+            else ""
+        )
+        child_markup = (
+            f'<p class="glossary-child">Child terms: {html.escape("; ".join(entry.child_terms))}</p>'
+            if entry.child_terms
+            else ""
+        )
+        definition_markup = (
+            '<section class="glossary-definition">'
+            "<h4>Explanation</h4>"
+            f"<p>{html.escape(entry.explanation or 'Definition not available.')}</p>"
+            "</section>"
+        )
         detail_panels.append(
             f'<article class="glossary-detail" id="{detail_id}" '
             f'data-term="{html.escape(term, quote=True)}" hidden>'
             '<div class="glossary-detail-heading">'
             f"<h3>{html.escape(term)}</h3>"
-            f'<span class="glossary-term-count">[{len(matches)}]</span>'
-            f'<span class="glossary-term-source">[{html.escape(sources)}]</span>'
+            f'<span class="glossary-term-count">[{frequency}]</span>'
+            f'<span class="glossary-term-source">[{html.escape(entry.source)}]</span>'
             "</div>"
+            f"{canonical_markup}"
+            f"{aliases_markup}"
             f"{parent_markup}"
-            f'{"".join(definition_markup)}'
-            f"{render_glossary_evidence(term, matches)}"
+            f"{child_markup}"
+            f"{definition_markup}"
+            f"{render_glossary_llm_check(term_key, term_usage_summaries, available_section_codes)}"
+            f"{render_glossary_evidence(matches)}"
             "</article>"
         )
 
@@ -1723,7 +2877,7 @@ def render_glossary_panel(
         '<h1>Glossary Overview<button class="back-to-top" type="button" aria-label="Back to top" '
         'title="Back to top">&#8593;</button></h1>'
         f'<p class="facts">{used_term_count} of {len(glossary)} terms occur across Chapters 1-5, SPM, and TS</p>'
-        '<p class="source-reference">SRCities-SOD and AR6</p>'
+        '<p class="source-reference">AR6 and AR7 SOD glossary (AO)</p>'
         "</header>"
         '<article class="glossary-overview">'
         '<div class="glossary-workspace">'
@@ -1751,6 +2905,52 @@ def render_glossary_panel(
         "</section>"
     )
     return panel, used_term_count
+
+
+def render_glossary_issue_table_panel(rows: list[GlossaryIssueRow], issue_term_count: int) -> str:
+    """Render a dedicated tab panel listing glossary terms with potential issues."""
+    if rows:
+        table_rows = []
+        for row in rows:
+            if row.node_id:
+                section_cell = (
+                    '<span class="glossary-evidence-location">'
+                    f"{html.escape(row.source_label)}</span>"
+                    '<button class="glossary-evidence-code" type="button" '
+                    f'data-source-node-id="{html.escape(row.node_id, quote=True)}">'
+                    f"{html.escape(row.section)}</button>"
+                )
+            else:
+                section_cell = html.escape(row.section)
+            table_rows.append(
+                "<tr>"
+                f"<td>{section_cell}</td>"
+                f"<td>{highlight_issue_sentence(row.sentence, row.term)}</td>"
+                f"<td>{html.escape(row.term)}</td>"
+                f"<td>{html.escape(row.issue)}</td>"
+                "</tr>"
+            )
+        content = (
+            '<div class="glossary-issue-wrap"><table class="glossary-issue-table">'
+            "<thead><tr><th>Section</th><th>Sentence</th><th>Terms with a potential issue</th><th>Potential issue</th></tr></thead>"
+            f'<tbody>{"".join(table_rows)}</tbody></table></div>'
+        )
+    else:
+        content = '<p class="glossary-issue-empty">No potential consistency issues identified from available term summaries.</p>'
+
+    return (
+        f'<section class="report-panel" id="{GLOSSARY_ISSUE_PANEL_ID}" role="tabpanel" '
+        f'aria-labelledby="{GLOSSARY_ISSUE_TAB_ID}" tabindex="0" data-metadata-visible="true" hidden>'
+        "<header>"
+        '<p class="kicker">Term consistency review</p>'
+        '<h1>Glossary Issue Table<button class="back-to-top" type="button" aria-label="Back to top" '
+        'title="Back to top">&#8593;</button></h1>'
+        f'<p class="facts">{len(rows)} issue rows across {issue_term_count} terms with potential issues</p>'
+        '<p class="source-reference">Derived from llm_term_check.json potential-issue sections</p>'
+        "</header>"
+        f'<article class="glossary-issue-overview">{content}</article>'
+        "</section>"
+    )
 
 
 def add_cae_check(markup: str, panel_markup: str) -> str:
@@ -1809,12 +3009,36 @@ def add_glossary_overview(markup: str, panel_markup: str) -> str:
     return f"{markup[:body_end]}{GLOSSARY_DIALOG_MARKUP}{GLOSSARY_JAVASCRIPT}{markup[body_end:]}"
 
 
+def add_glossary_issue_table(markup: str, panel_markup: str) -> str:
+    """Add the Glossary Issue Table tab, panel, and styles."""
+    metadata_button = markup.find('<button class="metadata-toggle"')
+    if metadata_button == -1:
+        raise ValueError("Could not find the metadata button in the report navigation.")
+    issue_tab = (
+        f'<button class="chapter-tab" type="button" id="{GLOSSARY_ISSUE_TAB_ID}" role="tab" '
+        f'aria-selected="false" aria-controls="{GLOSSARY_ISSUE_PANEL_ID}" tabindex="-1" '
+        'title="Glossary Issue Table">Glossary Issue Table</button>'
+    )
+    markup = f"{markup[:metadata_button]}{issue_tab}{markup[metadata_button:]}"
+
+    main_end = markup.rfind("</main>")
+    if main_end == -1:
+        raise ValueError("Could not find the report main closing tag.")
+    markup = f"{markup[:main_end]}\n{panel_markup}\n{markup[main_end:]}"
+
+    style_end = markup.find("</style>")
+    if style_end == -1:
+        raise ValueError("Could not find the report style block.")
+    markup = f"{markup[:style_end]}{GLOSSARY_ISSUE_TABLE_CSS}{markup[style_end:]}"
+    return markup
+
+
 def validate_cae_output(markup: str, result: CaeCheckResult) -> None:
     """Verify CAE tab order, aggregate counts, and malformed-case rows."""
     navigation, panels = parse_report_markup(markup)
-    if len(panels) != len(REPORT_ORDER) + 2:
-        raise ValueError("Generated output must contain seven reports, CAE check, and Glossary Overview.")
-    cae_panel = panels[-2]
+    if len(panels) != len(REPORT_ORDER) + 3:
+        raise ValueError("Generated output must contain seven reports, CAE check, Glossary Overview, and Glossary Issue Table.")
+    cae_panel = panels[-3]
     if cae_panel.attributes.get("id") != CAE_PANEL_ID or "hidden" not in cae_panel.attributes:
         raise ValueError("CAE check must be the penultimate, initially hidden panel.")
     expected_counts = {
@@ -1826,8 +3050,8 @@ def validate_cae_output(markup: str, result: CaeCheckResult) -> None:
         raise ValueError("CAE panel aggregate counts differ from the corpus scan.")
 
     tabs = parse_chapter_tabs(markup[navigation.start : navigation.end])
-    if len(tabs) != len(REPORT_ORDER) + 2 or tabs[-2].attributes.get("aria-controls") != CAE_PANEL_ID:
-        raise ValueError("CAE check must be the penultimate chapter-navigation tab.")
+    if len(tabs) != len(REPORT_ORDER) + 3 or tabs[-3].attributes.get("aria-controls") != CAE_PANEL_ID:
+        raise ValueError("CAE check must be the third-from-last chapter-navigation tab.")
 
     panel_markup = markup[cae_panel.start : cae_panel.end]
     if panel_markup.count('class="glossary-evidence-code"') != len(result.issues):
@@ -1872,27 +3096,58 @@ def validate_cae_output(markup: str, result: CaeCheckResult) -> None:
             raise ValueError("Per-report CAE confidence counts do not match their aggregate.")
 
 
-def validate_glossary_output(markup: str, glossary: Glossary, used_term_count: int) -> None:
-    """Verify the glossary tab mirrors app data without any LLM section."""
+def validate_glossary_output(markup: str, glossary: RevisedGlossary, used_term_count: int) -> None:
+    """Verify the glossary tab mirrors the revised workbook without LLM content."""
     _, panels = parse_report_markup(markup)
-    if len(panels) != len(REPORT_ORDER) + 2:
-        raise ValueError("Generated output must contain seven reports, CAE check, and Glossary Overview.")
-    if panels[-1].attributes.get("id") != GLOSSARY_PANEL_ID or "hidden" not in panels[-1].attributes:
-        raise ValueError("Glossary Overview must be the final, initially hidden panel.")
+    if len(panels) != len(REPORT_ORDER) + 3:
+        raise ValueError("Generated output must contain seven reports, CAE check, Glossary Overview, and Glossary Issue Table.")
+    if panels[-2].attributes.get("id") != GLOSSARY_PANEL_ID or "hidden" not in panels[-2].attributes:
+        raise ValueError("Glossary Overview must be the penultimate, initially hidden panel.")
 
     navigation, _ = parse_report_markup(markup)
     tabs = parse_chapter_tabs(markup[navigation.start : navigation.end])
-    if len(tabs) != len(REPORT_ORDER) + 2 or tabs[-1].attributes.get("aria-controls") != GLOSSARY_PANEL_ID:
-        raise ValueError("Glossary Overview must be the final chapter-navigation tab.")
+    if len(tabs) != len(REPORT_ORDER) + 3 or tabs[-2].attributes.get("aria-controls") != GLOSSARY_PANEL_ID:
+        raise ValueError("Glossary Overview must be the penultimate chapter-navigation tab.")
 
-    glossary_panel = markup[panels[-1].start : panels[-1].end]
+    glossary_panel = markup[panels[-2].start : panels[-2].end]
     if glossary_panel.count('class="glossary-term-row"') != len(glossary):
-        raise ValueError("Generated glossary term count differs from the encrypted bundle.")
+        raise ValueError("Generated glossary term count differs from the revised workbook.")
     if glossary_panel.count('class="glossary-detail"') != used_term_count:
         raise ValueError("Generated selectable glossary count differs from app usage counts.")
-    forbidden_llm_features = ('class="term-llm-summary"', "LLM summary", "llm_summary_")
-    if any(feature in glossary_panel for feature in forbidden_llm_features):
-        raise ValueError("Glossary Overview must not contain LLM summary content or controls.")
+
+    contexts_heading = f"<h4>{LLM_CONTEXTS_HEADING}</h4>"
+    issues_heading = f"<h4>{LLM_POTENTIAL_ISSUES_HEADING}</h4>"
+    conclusion_heading = f"<h4>{LLM_CONCLUSION_HEADING}</h4>"
+    if glossary_panel.count(contexts_heading) != used_term_count:
+        raise ValueError("Each rendered term must include the default Contexts of use heading.")
+    if glossary_panel.count(issues_heading) != used_term_count:
+        raise ValueError("Each rendered term must include the default Potential issues heading.")
+    if glossary_panel.count(conclusion_heading) != used_term_count:
+        raise ValueError("Each rendered term must include the default Conclusion heading.")
+
+    potential_issue_sections = re.findall(
+        r"<h4>" + re.escape(LLM_POTENTIAL_ISSUES_HEADING) + r"</h4>(?P<body>.*?)(?=<h4>" + re.escape(LLM_CONCLUSION_HEADING) + r"</h4>)",
+        glossary_panel,
+        re.DOTALL,
+    )
+    if len(potential_issue_sections) != used_term_count:
+        raise ValueError("Could not isolate all Potential issues sections in rendered summaries.")
+    flattened_evidence_pattern = '</li><li><button class="glossary-evidence-code glossary-inline-evidence-code"'
+    if any(flattened_evidence_pattern in section for section in potential_issue_sections):
+        raise ValueError("Potential issue evidence bullets must render as nested sublevel bullets.")
+
+
+def validate_glossary_issue_output(markup: str) -> None:
+    """Verify the Glossary Issue Table panel exists as the final hidden tab panel."""
+    navigation, panels = parse_report_markup(markup)
+    if len(panels) != len(REPORT_ORDER) + 3:
+        raise ValueError("Generated output must contain seven reports, CAE check, Glossary Overview, and Glossary Issue Table.")
+    if panels[-1].attributes.get("id") != GLOSSARY_ISSUE_PANEL_ID or "hidden" not in panels[-1].attributes:
+        raise ValueError("Glossary Issue Table must be the final, initially hidden panel.")
+
+    tabs = parse_chapter_tabs(markup[navigation.start : navigation.end])
+    if len(tabs) != len(REPORT_ORDER) + 3 or tabs[-1].attributes.get("aria-controls") != GLOSSARY_ISSUE_PANEL_ID:
+        raise ValueError("Glossary Issue Table must be the final chapter-navigation tab.")
 
 
 def validate_output(
@@ -1946,7 +3201,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the reordered SRCities reconstructed report.")
     parser.add_argument("--source-json", type=Path, default=DEFAULT_SOURCE_JSON)
     parser.add_argument("--reference-html", type=Path, default=DEFAULT_REFERENCE_HTML)
-    parser.add_argument("--archive", type=Path, default=ENCRYPTED_REPORT_PATH)
+    parser.add_argument("--glossary", type=Path, default=DEFAULT_GLOSSARY_PATH)
+    parser.add_argument("--term-summaries", type=Path, default=DEFAULT_TERM_SUMMARIES_PATH)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_HTML)
     return parser.parse_args()
 
@@ -1956,7 +3212,8 @@ def main() -> None:
     args = parse_args()
     source_json = args.source_json.expanduser()
     reference_html = args.reference_html.expanduser()
-    archive_path = args.archive.expanduser()
+    glossary_path = args.glossary.expanduser()
+    term_summaries_path = args.term_summaries.expanduser()
     output_path = args.output.expanduser()
 
     payload = json.loads(source_json.read_text(encoding="utf-8"))
@@ -1976,28 +3233,39 @@ def main() -> None:
     markup = apply_previous_header_style(markup)
     validate_output(markup, output_path, root_ids, node_ids, figure_count)
 
-    if not archive_path.is_file():
-        raise FileNotFoundError("Encrypted glossary archive is unavailable.")
-    _, glossary, _, _, _, _ = load_encrypted_assets(
-        str(archive_path),
-        archive_path.stat().st_mtime_ns,
-    )
+    if not glossary_path.is_file():
+        raise FileNotFoundError(f"Revised glossary workbook is unavailable: {glossary_path}")
+    glossary = load_revised_glossary(glossary_path)
+    match_map = build_glossary_match_map(glossary)
     node_codes = report_node_codes(markup)
-    occurrences = full_report_term_occurrences(payload, glossary, node_codes)
+    occurrences = full_report_term_occurrences(payload, glossary, match_map, node_codes)
     cae_result = full_report_cae_check(payload, node_codes)
-    markup = linkify_report_markup(markup, glossary, excluded_glossary_root_ids(payload))
+    term_usage_summaries = load_term_usage_summaries(term_summaries_path)
+    terms_with_issues, glossary_issue_rows = build_glossary_issue_rows(glossary, term_usage_summaries)
+    section_node_lookup = build_section_node_lookup(node_codes)
+    section_source_lookup = build_section_source_label_lookup(occurrences)
+    glossary_issue_rows = enrich_glossary_issue_rows(glossary_issue_rows, section_node_lookup, section_source_lookup)
+    markup = linkify_report_markup(markup, glossary, match_map, excluded_glossary_root_ids(payload))
     markup = add_cae_check(markup, render_cae_panel(cae_result))
-    glossary_panel, used_term_count = render_glossary_panel(glossary, occurrences)
+    glossary_panel, used_term_count = render_glossary_panel(
+        glossary,
+        occurrences,
+        terms_with_issues,
+        term_usage_summaries,
+    )
     markup = add_glossary_overview(markup, glossary_panel)
+    issue_panel = render_glossary_issue_table_panel(glossary_issue_rows, len(terms_with_issues))
+    markup = add_glossary_issue_table(markup, issue_panel)
     validate_cae_output(markup, cae_result)
     validate_glossary_output(markup, glossary, used_term_count)
+    validate_glossary_issue_output(markup)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(markup, encoding="utf-8")
     print(
         f"Wrote {output_path} with {len(root_ids)} reports, {sum(node_ids.values())} nodes, "
-        f"{figure_count} figures, {len(glossary)} glossary terms, and "
-        f"{cae_result.candidate_count} CAE candidates."
+        f"{figure_count} figures, {len(glossary)} glossary terms, {len(match_map)} glossary match names, and "
+        f"{cae_result.candidate_count} CAE candidates, and {len(glossary_issue_rows)} glossary issue rows."
     )
 
 
