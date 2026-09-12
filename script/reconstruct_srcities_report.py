@@ -160,6 +160,23 @@ def normalize_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "").replace("\u00a0", " ")).strip()
 
 
+def normalize_section_identifier(value: object) -> str:
+    """Normalize section labels so numeric codes and paragraph markers are consistently spaced."""
+    text = normalize_text(value)
+    text = re.sub(
+        r"\bP[\s.\-]*(\d+)\b",
+        lambda match: f"P{match.group(1)}",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"\b(\d+(?:\.\d+)+)\s*(P\d+)\b",
+        lambda match: f"{match.group(1)} {match.group(2).upper()}",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
 def split_cell_lines(value: object) -> tuple[str, ...]:
     """Return unique non-empty newline-separated workbook values in source order."""
     values = [normalize_text(line) for line in str(value or "").splitlines()]
@@ -592,6 +609,14 @@ GLOSSARY_CSS = """
                 text-underline-offset: .14em;
             }
             .report-glossary-link:hover { color: #004f6a; }
+            .report-glossary-link.has-issue {
+                color: #8a2a16;
+            }
+            .report-glossary-link-issue-flag {
+                color: #8a2a16;
+                font-weight: 800;
+                margin-left: .2em;
+            }
             .glossary-definition-dialog {
                 border: 1px solid var(--rule);
                 border-radius: 4px;
@@ -907,6 +932,51 @@ GLOSSARY_JAVASCRIPT = """
                 const paragraphDialogLocation = paragraphDialog?.querySelector(".glossary-paragraph-location");
                 const paragraphDialogText = paragraphDialog?.querySelector(".glossary-paragraph-text");
                 const paragraphDialogClose = paragraphDialog?.querySelector(".glossary-dialog-close");
+                const issuePanel = document.getElementById("glossary-issue-table-panel");
+
+                const normalizeIssueTerm = (value) => value.replace(/\s+/g, " ").trim().toLocaleLowerCase();
+
+                const issueTargetsFromTable = () => {
+                    if (!issuePanel) return [];
+                    const targets = [];
+                    issuePanel.querySelectorAll(".glossary-issue-table tbody tr").forEach((row) => {
+                        const sourceButton = row.querySelector('td:first-child .glossary-evidence-code[data-source-node-id]');
+                        const termCell = row.querySelector("td:nth-child(2)");
+                        const key = normalizeIssueTerm(termCell?.textContent || "");
+                        const nodeId = sourceButton?.dataset.sourceNodeId || "";
+                        if (nodeId && key) {
+                            targets.push({ nodeId, termKey: key });
+                        }
+                    });
+                    return targets;
+                };
+
+                const flagIssueTermsInReportText = () => {
+                    const targets = issueTargetsFromTable();
+                    const links = document.querySelectorAll('section.report-panel[id^="chapter-panel-"] a.report-glossary-link');
+                    links.forEach((link) => {
+                        link.classList.remove("has-issue");
+                        link.querySelector(".report-glossary-link-issue-flag")?.remove();
+                    });
+
+                    targets.forEach(({ nodeId, termKey }) => {
+                        const sourceNode = document.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`);
+                        if (!sourceNode) return;
+                        if (!sourceNode.closest('section.report-panel[id^="chapter-panel-"]')) return;
+
+                        sourceNode.querySelectorAll("a.report-glossary-link").forEach((link) => {
+                            const linkTerm = normalizeIssueTerm(link.dataset.term || link.textContent || "");
+                            if (linkTerm !== termKey) return;
+                            if (link.querySelector(".report-glossary-link-issue-flag")) return;
+                            link.classList.add("has-issue");
+                            const flag = document.createElement("span");
+                            flag.className = "report-glossary-link-issue-flag";
+                            flag.setAttribute("aria-hidden", "true");
+                            flag.textContent = "!";
+                            link.append(flag);
+                        });
+                    });
+                };
 
                 const filterTerms = () => {
                     const query = searchInput?.value.trim().toLocaleLowerCase() || "";
@@ -1283,6 +1353,7 @@ GLOSSARY_JAVASCRIPT = """
                 formatGlossaryNameRows();
                 formatLegacyContextLists();
                 formatPotentialIssueEvidence();
+                flagIssueTermsInReportText();
                 filterTerms();
 
                 const hashDetail = window.location.hash ? document.getElementById(window.location.hash.slice(1)) : null;
@@ -2077,7 +2148,7 @@ def parse_issue_rows_for_term(term: str, summary: str) -> list[GlossaryIssueRow]
             for identifier in identifiers:
                 rows.append(
                     GlossaryIssueRow(
-                        section=identifier,
+                        section=normalize_section_identifier(identifier),
                         sentence=quote,
                         term=term,
                         issue=issue_text,
@@ -2090,7 +2161,7 @@ def parse_issue_rows_for_term(term: str, summary: str) -> list[GlossaryIssueRow]
         if evidence_match:
             rows.append(
                 GlossaryIssueRow(
-                    section=strip_markdown_inline(evidence_match.group("section")),
+                    section=normalize_section_identifier(strip_markdown_inline(evidence_match.group("section"))),
                     sentence=strip_markdown_inline(evidence_match.group("quote")),
                     term=term,
                     issue=current_issue,
@@ -2131,7 +2202,7 @@ def build_section_node_lookup(node_codes: dict[str, str]) -> dict[str, str]:
     """Map visible section code to source node id for clickable issue-table links."""
     lookup: dict[str, str] = {}
     for node_id, node_code in node_codes.items():
-        key = normalize_text(node_code)
+        key = normalize_section_identifier(node_code)
         if key and key not in lookup:
             lookup[key] = node_id
     return lookup
@@ -2142,7 +2213,7 @@ def build_section_source_label_lookup(occurrences: GlossaryOccurrences) -> dict[
     labels: dict[str, str] = {}
     for matches in occurrences.values():
         for item in matches:
-            key = normalize_text(item.node_code)
+            key = normalize_section_identifier(item.node_code)
             if key and key not in labels:
                 labels[key] = item.source_label
     return labels
@@ -2156,7 +2227,7 @@ def enrich_glossary_issue_rows(
     """Attach node ids and source labels to parsed issue rows for clickable rendering."""
     enriched: list[GlossaryIssueRow] = []
     for row in rows:
-        section_key = normalize_text(row.section)
+        section_key = normalize_section_identifier(row.section)
         node_id = section_node_lookup.get(section_key, "")
         source_label = section_source_lookup.get(section_key, "")
         enriched.append(
@@ -2916,6 +2987,7 @@ def render_glossary_issue_table_panel(rows: list[GlossaryIssueRow], issue_term_c
                 section_cell = (
                     '<span class="glossary-evidence-location">'
                     f"{html.escape(row.source_label)}</span>"
+                    ' '
                     '<button class="glossary-evidence-code" type="button" '
                     f'data-source-node-id="{html.escape(row.node_id, quote=True)}">'
                     f"{html.escape(row.section)}</button>"
@@ -2945,7 +3017,7 @@ def render_glossary_issue_table_panel(rows: list[GlossaryIssueRow], issue_term_c
         '<p class="kicker">Term consistency review</p>'
         '<h1>Glossary Issue Table<button class="back-to-top" type="button" aria-label="Back to top" '
         'title="Back to top">&#8593;</button></h1>'
-        f'<p class="facts">{len(rows)} issue rows across {issue_term_count} terms with potential issues</p>'
+        f'<p class="facts">{len(rows)} issue sentences across {issue_term_count} terms with potential issues</p>'
         '<p class="source-reference">Derived from llm_term_check.json potential-issue sections</p>'
         "</header>"
         f'<article class="glossary-issue-overview">{content}</article>'
