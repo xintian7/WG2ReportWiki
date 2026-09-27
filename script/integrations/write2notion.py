@@ -12,13 +12,13 @@ _login_property_schema: dict[str, tuple[str, str]] | None = None
 _login_property_schema_database_id: str | None = None
 
 try:
-    from script.env_loader import load_env
+    from script.app.env_loader import load_env
 except ModuleNotFoundError:
     import sys
     from pathlib import Path
 
     sys.path.append(str(Path(__file__).resolve().parent.parent))
-    from script.env_loader import load_env
+    from script.app.env_loader import load_env
 
 
 def _get_notion_settings() -> tuple[str, str]:

@@ -2,7 +2,7 @@
 """Extract the executive summary from each SRCities chapter DOCX as Markdown.
 
 Example:
-    /opt/anaconda3/envs/tsu/bin/python script/extract_executive_summaries.py
+    /opt/anaconda3/envs/tsu/bin/python script/reports/extract_executive_summaries.py
 """
 
 from __future__ import annotations

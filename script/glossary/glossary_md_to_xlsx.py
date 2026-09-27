@@ -6,7 +6,7 @@ The parser expects lines in this pattern for new entries:
 Continuation lines are appended to the previous definition.
 
 Example:
-    /opt/anaconda3/envs/tsu/bin/python script/glossary_md_to_xlsx.py \
+    /opt/anaconda3/envs/tsu/bin/python script/glossary/glossary_md_to_xlsx.py \
       --input data/IPCC_AR6_WGI_FGD_AnnexVII_Glossary.md \
       --output data/IPCC_AR6_WGI_FGD_AnnexVII_Glossary.xlsx
 """

@@ -2,7 +2,7 @@
 """Generate GPT-5.4 terminology-consistency summaries.
 
 This script analyzes canonical terms from
-``data/Glossary/AR6_AR7SOD_Glossary_AO.xlsx`` and searches the full report
+``data/Glossary/AR6_SRCities-SOD_Glossary_AO.xlsx`` and searches the full report
 corpus (Chapters 1-5, SPM, TS) using all searchable forms from columns A through E.
 
 Each standard run replaces the JSON results artifact before processing terms while
@@ -61,7 +61,7 @@ from typing import Any
 import dotenv
 from openai import AzureOpenAI
 
-from reconstruct_srcities_report import (
+from script.reports.reconstruct_srcities_report import (
     DEFAULT_GLOSSARY_PATH,
     DEFAULT_OUTPUT_HTML,
     DEFAULT_SOURCE_JSON,
@@ -73,7 +73,7 @@ from reconstruct_srcities_report import (
     report_node_codes,
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_PROMPT_PATH = REPO_ROOT / "data" / "prompt" / "llm_term_usage_summary_prompt.md"
 DEFAULT_OUTPUT_PATH = REPO_ROOT / "data" / "analysis" / "llm_term_check.json"
 DEFAULT_LOG_PATH = REPO_ROOT / "data" / "analysis" / "llm_term_check.log"

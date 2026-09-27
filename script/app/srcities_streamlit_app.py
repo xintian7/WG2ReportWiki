@@ -19,7 +19,7 @@ from collections.abc import Mapping
 
 from cryptography.fernet import InvalidToken
 from dotenv import load_dotenv
-from encrypt_srsod import get_fernet
+from script.app.encrypt_srsod import get_fernet
 from markdown_it import MarkdownIt
 from openpyxl import load_workbook
 import plotly.graph_objects as go
@@ -254,20 +254,20 @@ GLOSSARY_NETWORK = st.components.v2.component(
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent
 USER_PASSWORDS_ENV_NAME = "user_pwd"
 load_dotenv(REPO_ROOT / ".env", override=False)
 ENCRYPTED_REPORT_PATH = REPO_ROOT / "data" / "encrypted" / "SRSOD.enc"
 USER_GUIDE_PATH = REPO_ROOT / "data" / "user_guide.html"
-USER_GUIDE_SETTINGS_IMAGE_PATH = REPO_ROOT / "data" / "iamges4UG" / "image1.png"
-USER_GUIDE_GLOSSARY_IMAGE_PATH = REPO_ROOT / "data" / "iamges4UG" / "image2.png"
-USER_GUIDE_LLM_SUMMARY_IMAGE_PATH = REPO_ROOT / "data" / "iamges4UG" / "image3.png"
+USER_GUIDE_SETTINGS_IMAGE_PATH = REPO_ROOT / "data" / "images4UG" / "image1.png"
+USER_GUIDE_GLOSSARY_IMAGE_PATH = REPO_ROOT / "data" / "images4UG" / "image2.png"
+USER_GUIDE_LLM_SUMMARY_IMAGE_PATH = REPO_ROOT / "data" / "images4UG" / "image3.png"
 REPORT_ARCHIVE_NAME = "data/report/SRCities_FOD_SPM_Final.md"
 TERM_USAGE_SUMMARY_PROMPT_ARCHIVE_NAME = "data/prompt/llm_term_usage_summary_prompt.md"
 TERM_USAGE_SUMMARIES_ARCHIVE_NAME = "data/analysis/llm_term_check.json"
 GLOSSARY_ARCHIVE_MEMBER_NAMES = (
     "data/Glossary/AR6FGD_Glossary.xlsx",
-    "data/Glossary/AR7SOD_Glossary.xlsx",
+    "data/Glossary/SRCities-SOD_Glossary.xlsx",
 )
 GLOSSARY_NETWORK_ARCHIVE_MEMBER_NAME = "data/network/SRCities_glossary_network.cypher"
 EXECUTIVE_SUMMARY_ARCHIVE_MEMBER_NAMES = {
@@ -939,7 +939,7 @@ def render_term_details(
             st.session_state.pop(summary_state_key, None)
             st.info(
                 "No precomputed LLM summary is available for this term. "
-                "Run script/generate_term_usage_summaries.py and rebuild SRSOD.enc."
+                "Run script/reports/generate_term_usage_summaries.py and rebuild SRSOD.enc."
             )
 
     summary = st.session_state.get(summary_state_key, "")

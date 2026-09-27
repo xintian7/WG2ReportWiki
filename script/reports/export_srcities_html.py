@@ -12,7 +12,7 @@ import html
 from pathlib import Path
 import re
 
-from srcities_streamlit_app import (
+from script.app.srcities_streamlit_app import (
     ENCRYPTED_REPORT_PATH,
     EXECUTIVE_SUMMARY_ITEM_RE,
     FIGURE_CAPTION_RE,
@@ -45,7 +45,7 @@ from srcities_streamlit_app import (
 
 
 DEFAULT_OUTPUT_PATH = REPO_ROOT / "data" / "export" / "SRCities_terminology_review.html"
-EXPORT_TITLE = "SRCities terminology review (version August 21, 2026 based on SOD)"
+EXPORT_TITLE = "SRCities terminology review (version 23 Sep 2026 based on SOD)"
 TERM_LINK_RE = re.compile(r'<a href="#" data-term="(?P<term>[^"]+)">')
 SourceStatementKey = tuple[str, str]
 SourceStatementAnchors = dict[SourceStatementKey, str]

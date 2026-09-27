@@ -8,7 +8,7 @@ SOD explanations taking precedence over AR6 explanations. Appended note sections
 are omitted from AR6 explanations.
 
 Example:
-    /opt/anaconda3/envs/tsu_repwiki/bin/python script/merge_ar6_ar7sod_glossaries.py
+    /opt/anaconda3/envs/tsu_repwiki/bin/python script/glossary/merge_ar6_ar7sod_glossaries.py
 """
 
 from __future__ import annotations
@@ -26,14 +26,14 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ORDER = ("AR6WGI", "AR6WGII", "AR6WGIII", "AR7SOD")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_ORDER = ("AR6WGI", "AR6WGII", "AR6WGIII", "SRCities-SOD")
 DEFAULT_WGI_PATH = REPO_ROOT / "data/Glossary/AR6WGI_glossary.doc"
 DEFAULT_WGII_PATH = REPO_ROOT / "data/Glossary/AR6WGII_glossary.doc"
 DEFAULT_WGIII_PATH = REPO_ROOT / "data/Glossary/AR6WGIII_glossary.doc"
-DEFAULT_AR7SOD_PATH = REPO_ROOT / "data/Glossary/AR7SOD_Glossary.xlsx"
+DEFAULT_SRCITIES_SOD_PATH = REPO_ROOT / "data/Glossary/SRCities-SOD_Glossary.xlsx"
 DEFAULT_SOD_JSON_PATH = REPO_ROOT / "data/srsod-structure.json"
-DEFAULT_OUTPUT_PATH = REPO_ROOT / "data/Glossary/AR6_AR7SOD_Glossary.xlsx"
+DEFAULT_OUTPUT_PATH = REPO_ROOT / "data/Glossary/AR6_SRCities-SOD_Glossary.xlsx"
 ENTRY_STYLE_RE = re.compile(
     r"(?:^|;)\s*margin-bottom\s*:\s*15px(?:;|$)",
     re.IGNORECASE,
@@ -761,8 +761,8 @@ def source_label(entry: MergedGlossaryEntry) -> str:
 
 def format_explanation(entry: MergedGlossaryEntry) -> str:
     """Prefer AR7 SOD; otherwise retain distinct labelled AR6 definitions."""
-    if "AR7SOD" in entry.sources:
-        return "\n\n".join(entry.explanations.get("AR7SOD", []))
+    if "SRCities-SOD" in entry.sources:
+        return "\n\n".join(entry.explanations.get("SRCities-SOD", []))
 
     explanation_sources: dict[str, list[str]] = {}
     for source in SOURCE_ORDER[:-1]:
@@ -862,7 +862,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wgi", type=Path, default=DEFAULT_WGI_PATH)
     parser.add_argument("--wgii", type=Path, default=DEFAULT_WGII_PATH)
     parser.add_argument("--wgiii", type=Path, default=DEFAULT_WGIII_PATH)
-    parser.add_argument("--ar7sod", type=Path, default=DEFAULT_AR7SOD_PATH)
+    parser.add_argument("--ar7sod", type=Path, default=DEFAULT_SRCITIES_SOD_PATH)
     parser.add_argument("--sod-json", type=Path, default=DEFAULT_SOD_JSON_PATH)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     return parser.parse_args()
@@ -874,7 +874,7 @@ def main() -> None:
         "AR6WGI": args.wgi,
         "AR6WGII": args.wgii,
         "AR6WGIII": args.wgiii,
-        "AR7SOD": args.ar7sod,
+        "SRCities-SOD": args.ar7sod,
         "SOD full text": args.sod_json,
     }
     missing_paths = [path for path in source_paths.values() if not path.is_file()]
@@ -885,8 +885,8 @@ def main() -> None:
         source: parse_glossary(source_paths[source], source)
         for source in SOURCE_ORDER[:-1]
     }
-    entries_by_source["AR7SOD"] = parse_glossary_workbook(
-        source_paths["AR7SOD"], "AR7SOD"
+    entries_by_source["SRCities-SOD"] = parse_glossary_workbook(
+        source_paths["SRCities-SOD"], "SRCities-SOD"
     )
     glossary = merge_glossaries(entries_by_source)
     text_blocks = load_sod_text_blocks(args.sod_json)

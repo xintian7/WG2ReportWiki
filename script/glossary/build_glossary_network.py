@@ -11,7 +11,7 @@ import re
 
 from openpyxl import load_workbook
 
-from srcities_streamlit_app import (
+from script.app.srcities_streamlit_app import (
     EXECUTIVE_SUMMARY_ITEM_RE,
     FIGURE_CAPTION_RE,
     FIRST_LEVEL_STATEMENT_RE,
@@ -25,11 +25,11 @@ from srcities_streamlit_app import (
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent
 REPORT_PATH = REPO_ROOT / "data" / "report" / "SRCities_FOD_SPM_Final.md"
 GLOSSARY_PATHS = (
     REPO_ROOT / "data" / "Glossary" / "AR6FGD_Glossary.xlsx",
-    REPO_ROOT / "data" / "Glossary" / "AR7SOD_Glossary.xlsx",
+    REPO_ROOT / "data" / "Glossary" / "SRCities-SOD_Glossary.xlsx",
 )
 EXECUTIVE_SUMMARY_PATHS = {
     f"Chapter {chapter}": REPO_ROOT / "data" / "ES" / f"SRCities_SOD_Ch{chapter:02d}_Final_executive_summary.md"

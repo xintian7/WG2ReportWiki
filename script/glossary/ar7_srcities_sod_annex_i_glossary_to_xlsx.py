@@ -5,7 +5,7 @@ Indented glossary terms are subterms of the most recent non-indented term and
 are written with that main term in the ``Parent`` column.
 
 Example:
-    /opt/anaconda3/envs/tsu/bin/python script/annex_i_glossary_to_xlsx.py
+    /opt/anaconda3/envs/tsu/bin/python script/ar7_srcities_sod_annex_i_glossary_to_xlsx.py
 """
 
 from __future__ import annotations
@@ -129,13 +129,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("data/Glossary/SRCities_SOD_AnnexI_Final.docx"),
+        default=Path("data/Glossary/archived/SRCities_SOD_AnnexI_Final.docx"),
         help="Path to the Annex I DOCX glossary.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("data/Glossary/AR7SOD_Glossary.xlsx"),
+        default=Path("data/Glossary/archived/SRCities-SOD_Glossary.xlsx"),
         help="Path for the generated Excel workbook.",
     )
     return parser.parse_args()

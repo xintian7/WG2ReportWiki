@@ -6,7 +6,7 @@ as their parent. For ``See Term (under Parent)``, the explicitly named outer
 parent is used. Incidental ``See also`` citations remain unassigned.
 
 Example:
-    /opt/anaconda3/envs/tsu/bin/python script/ar6_fgd_glossary_to_xlsx.py
+    /opt/anaconda3/envs/tsu/bin/python script/glossary/ar6_fgd_glossary_to_xlsx.py
 """
 
 from __future__ import annotations

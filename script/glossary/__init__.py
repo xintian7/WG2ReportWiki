@@ -1,0 +1,1 @@
+"""Glossary processing scripts."""

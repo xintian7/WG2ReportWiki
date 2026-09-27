@@ -5,10 +5,10 @@ Date: 2026-08-08
 ## Completed
 
 - Converted the source materials into Markdown and glossary data with the existing scripts in `script/`.
-- Built the SRCities Streamlit reader in `script/srcities_streamlit_app.py`.
+- Built the SRCities Streamlit reader in `script/app/srcities_streamlit_app.py`.
 - Added inline clickable glossary terms, a glossary browser, and sentence-level term details.
 - Added the interactive Glossary Net using a Streamlit Components v2 custom SVG component.
-- Added the offline network generator in `script/build_glossary_network.py` and saved its output to `data/SRCities_glossary_network.cypher`.
+- Added the offline network generator in `script/glossary/build_glossary_network.py` and saved its output to `data/SRCities_glossary_network.cypher`.
 
 ## Glossary Net Corrections
 
@@ -29,7 +29,7 @@ Date: 2026-08-08
 
 ## Validation
 
-- `python -m py_compile script/build_glossary_network.py script/srcities_streamlit_app.py` passed after the relevant changes.
+- `python -m py_compile script/glossary/build_glossary_network.py script/app/srcities_streamlit_app.py` passed after the relevant changes.
 - Verified every generated glossary-network edge against its cleaned sentence evidence.
 - Verified the Sankey extraction finds 220 links from 72 numbered findings to 89 numeric references.
 - Verified Plotly serializes the Sankey figure successfully.

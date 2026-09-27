@@ -2,7 +2,7 @@
 """Encrypt the SRCities report, glossary, network, executive summaries, LLM prompt, and summaries.
 
 Set FERNET_KEY to a valid Fernet key before running:
-    FERNET_KEY="..." /opt/anaconda3/envs/tsu/bin/python script/encrypt_srsod.py
+    FERNET_KEY="..." /opt/anaconda3/envs/tsu/bin/python script/app/encrypt_srsod.py
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent
 EXECUTIVE_SUMMARY_INPUT_PATHS = tuple(
     REPO_ROOT / f"data/ES/SRCities_SOD_Ch{chapter:02d}_Final_executive_summary.md"
     for chapter in range(1, 6)
@@ -27,7 +27,7 @@ TERM_USAGE_SUMMARY_PROMPT_INPUT_PATH = REPO_ROOT / "data/prompt/llm_term_usage_s
 TERM_USAGE_SUMMARIES_INPUT_PATH = REPO_ROOT / "data/analysis/llm_term_check.json"
 INPUT_PATHS = (
     REPO_ROOT / "data/Glossary/AR6FGD_Glossary.xlsx",
-    REPO_ROOT / "data/Glossary/AR7SOD_Glossary.xlsx",
+    REPO_ROOT / "data/Glossary/SRCities-SOD_Glossary.xlsx",
     REPO_ROOT / "data/report/SRCities_FOD_SPM_Final.md",
     REPO_ROOT / "data/network/SRCities_glossary_network.cypher",
     *EXECUTIVE_SUMMARY_INPUT_PATHS,

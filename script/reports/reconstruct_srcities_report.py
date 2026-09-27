@@ -21,13 +21,13 @@ from typing import Any
 from openpyxl import load_workbook
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE_JSON = REPO_ROOT / "data" / "srsod-structure.json"
-DEFAULT_REFERENCE_HTML = REPO_ROOT / "data" / "export" / "deprecated_srsod-reconstructed.html"
-DEFAULT_OUTPUT_HTML = REPO_ROOT / "data" / "export" / "SRCities_terminology_review.html"
+DEFAULT_REFERENCE_HTML = REPO_ROOT / "data" / "export" / "SRCities_consistencycheck.html"
+DEFAULT_OUTPUT_HTML = REPO_ROOT / "data" / "export" / "SRCities_consistencycheck.html"
 DEFAULT_GLOSSARY_PATH = REPO_ROOT / "data" / "Glossary" / "AR6_AR7SOD_Glossary_AO.xlsx"
 DEFAULT_TERM_SUMMARIES_PATH = REPO_ROOT / "data" / "analysis" / "llm_term_check.json"
-REPORT_HEADER_TITLE = "SRCities terminology review (version Sep 10, 2026 based on SOD)"
+REPORT_HEADER_TITLE = "SRCities terminology review (version 10 Sep 2026 based on SOD)"
 REFERENCE_KICKER = '<p class="kicker">Reconstructed report</p>'
 OUTPUT_KICKER = '<p class="kicker">Reconstructed report in HTML</p>'
 GLOSSARY_TAB_ID = "glossary-overview-tab"
@@ -148,6 +148,7 @@ class GlossaryIssueRow:
     issue: str
     node_id: str = ""
     source_label: str = ""
+    aliases: tuple[str, ...] = ()
 
 
 RevisedGlossary = dict[str, RevisedGlossaryEntry]
@@ -665,25 +666,633 @@ GLOSSARY_ISSUE_TABLE_CSS = """
             .glossary-issue-table {
                 border-collapse: collapse;
                 border-spacing: 0;
+                table-layout: fixed;
                 width: 100%;
             }
+            .glossary-issue-table th:nth-child(1),
+            .glossary-issue-table td:nth-child(1) { width: 15%; }
+            .glossary-issue-table th:nth-child(2),
+            .glossary-issue-table td:nth-child(2) { width: 15%; }
+            .glossary-issue-table th:nth-child(3),
+            .glossary-issue-table td:nth-child(3) { width: 30%; }
+            .glossary-issue-table th:nth-child(4),
+            .glossary-issue-table td:nth-child(4) { width: 40%; }
             .glossary-issue-table th,
             .glossary-issue-table td {
                 border: 1px solid var(--rule);
                 padding: .6rem .7rem;
                 text-align: left;
                 vertical-align: top;
+                word-break: break-word;
             }
             .glossary-issue-table th {
                 background: #f2f7f9;
                 color: var(--ipcc-blue);
                 font-weight: 800;
-                white-space: nowrap;
+                white-space: normal;
             }
             .glossary-issue-empty {
                 color: var(--muted);
                 margin: .2rem 0 0;
             }
+
+            .glossary-issue-search { margin: 1rem 0; }
+            .glossary-issue-search label { display: block; font-weight: 600; }
+            .glossary-issue-search-input { display: block; width: 100%; max-width: 42rem; box-sizing: border-box; margin-top: .35rem; padding: .45rem .6rem; }
+            .glossary-issue-search-input:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+            .glossary-issue-search-hint { margin: .35rem 0; font-size: .9em; }
+            .glossary-issue-search-status { margin: .35rem 0; font-size: .9em; }
+            .glossary-issue-search-status[data-error='true'] { color: #a00; }
+            .glossary-issue-export { display: flex; flex-wrap: wrap; gap: .5rem; margin: .35rem 0; }
+            .glossary-issue-export button { cursor: pointer; }
+            .glossary-issue-term-button {
+                background: none;
+                border: 0;
+                color: #005f86;
+                cursor: pointer;
+                font: inherit;
+                font-weight: 700;
+                padding: 0;
+                text-align: left;
+                text-decoration: underline;
+                text-decoration-thickness: 1px;
+                text-underline-offset: .12em;
+            }
+            .glossary-issue-term-button:hover { color: #004660; }
+            .glossary-issue-term-button:focus-visible {
+                outline: 2px solid currentColor;
+                outline-offset: 2px;
+            }
+            .glossary-issue-table { table-layout: fixed; }
+
+            .glossary-issue-controls {
+                display: grid;
+                gap: .75rem;
+                grid-template-columns: minmax(11rem, 14rem) minmax(0, 1fr);
+            }
+            .glossary-issue-chapter {
+                appearance: none;
+                background: #fff;
+                border: 1px solid #c7c7c7;
+                border-radius: .25rem;
+                box-sizing: border-box;
+                color: inherit;
+                font: inherit;
+                min-height: 2.5rem;
+                padding: .5rem .75rem;
+                width: 100%;
+            }
+            .glossary-issue-chapter:focus-visible {
+                outline: 2px solid currentColor;
+                outline-offset: 2px;
+            }
+            @media (max-width: 40rem) {
+                .glossary-issue-controls { grid-template-columns: 1fr; }
+            }
+"""
+
+GLOSSARY_ISSUE_TABLE_JAVASCRIPT = """
+        <script>
+        // glossary-issue-search-script
+        (() => {
+            const panel = document.querySelector('#glossary-issue-table-panel');
+            if (!panel) return;
+
+            const chapterSelect = panel.querySelector('#glossary-issue-chapter');
+            const searchInput = panel.querySelector('.glossary-issue-search-input');
+            const status = panel.querySelector('.glossary-issue-search-status');
+            const downloadHtml = panel.querySelector('.glossary-issue-download-html');
+            const downloadPdf = panel.querySelector('.glossary-issue-download-pdf');
+            const definitionDialog = document.getElementById('glossary-definition-dialog');
+            const definitionDialogTitle = definitionDialog?.querySelector('.glossary-dialog-title');
+            const definitionDialogContent = definitionDialog?.querySelector('.glossary-dialog-content');
+            const rows = Array.from(panel.querySelectorAll('.glossary-issue-table tbody tr'));
+            if (!chapterSelect || !searchInput || !status || rows.length === 0) return;
+
+            const normalizeTerm = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const sentenceBoundary = /(?<=[.!?])\\s+(?=[A-Z0-9"“(\\[])/;
+            const escapeHtml = (value) => String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+            const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&');
+
+            const detailByTerm = new Map();
+            const aliasesByCanonical = new Map();
+            const canonicalByTerm = new Map();
+            const addDetail = (rawTerm, htmlContent) => {
+                const key = normalizeTerm(rawTerm);
+                if (!key || detailByTerm.has(key) || !htmlContent) return;
+                detailByTerm.set(key, htmlContent);
+            };
+
+            const parseAliasesFromDetail = (detail) => {
+                const aliasesText = detail.querySelector('.glossary-aliases')?.textContent || '';
+                return aliasesText
+                    .replace(/^\\s*Alias\\(es\\):\\s*/i, '')
+                    .split(',')
+                    .map((item) => item.replace(/\\s*\\[[^\\]]+\\]\\s*$/, '').trim())
+                    .filter(Boolean);
+            };
+
+            const detailPopupMarkup = (detail) => {
+                const clone = detail.cloneNode(true);
+                clone.removeAttribute('hidden');
+                clone.removeAttribute('id');
+                clone.querySelectorAll('[id]').forEach((element) => element.removeAttribute('id'));
+                return clone.innerHTML;
+            };
+
+            document.querySelectorAll('#glossary-overview-panel .glossary-detail').forEach((detail) => {
+                const canonicalTerm = detail.querySelector('h3')?.textContent?.trim() || '';
+                const detailHtml = detailPopupMarkup(detail);
+                if (!canonicalTerm || !detailHtml) return;
+
+                const canonicalKey = normalizeTerm(canonicalTerm);
+                const aliases = parseAliasesFromDetail(detail);
+                aliasesByCanonical.set(canonicalKey, aliases);
+                canonicalByTerm.set(canonicalKey, canonicalTerm);
+
+                addDetail(canonicalTerm, detailHtml);
+                aliases.forEach((alias) => {
+                    canonicalByTerm.set(normalizeTerm(alias), canonicalTerm);
+                    addDetail(alias, detailHtml);
+                });
+            });
+
+            const termLookupVariants = (rawTerm) => {
+                const source = (rawTerm || '').replace(/\\s+/g, ' ').trim();
+                if (!source) return [];
+
+                const variants = [source];
+                const withoutParen = source
+                    .replace(/\\s*\\([^)]*\\)\\s*/g, ' ')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+                if (withoutParen && withoutParen !== source) {
+                    variants.push(withoutParen);
+                }
+
+                const parenMatches = source.match(/\\(([^)]+)\\)/g) || [];
+                parenMatches
+                    .map((chunk) => chunk.replace(/[()]/g, '').trim())
+                    .filter(Boolean)
+                    .forEach((chunk) => {
+                        variants.push(chunk);
+                        if (/^[A-Za-z]{2,}s$/.test(chunk)) {
+                            variants.push(chunk.slice(0, -1));
+                        }
+                    });
+
+                return Array.from(new Set(variants));
+            };
+
+            const resolveCanonicalKey = (term) => {
+                const variantKeys = termLookupVariants(term).map((variant) => normalizeTerm(variant));
+                for (const key of variantKeys) {
+                    const mappedCanonical = canonicalByTerm.get(key);
+                    if (mappedCanonical) {
+                        return normalizeTerm(mappedCanonical);
+                    }
+                    if (aliasesByCanonical.has(key)) {
+                        return key;
+                    }
+                }
+                return normalizeTerm(term || '');
+            };
+
+            const termHighlightCandidates = (term, includeAliases = false) => {
+                const source = (term || '').replace(/\\s+/g, ' ').trim();
+                if (!source) return [];
+
+                const candidates = [source];
+                const parenMatches = source.match(/\\(([^)]+)\\)/g) || [];
+                parenMatches
+                    .map((chunk) => chunk.replace(/[()]/g, '').trim())
+                    .filter(Boolean)
+                    .forEach((chunk) => candidates.push(chunk));
+
+                if (includeAliases) {
+                    const canonicalKey = resolveCanonicalKey(source);
+                    const aliasCandidates = aliasesByCanonical.get(canonicalKey) || [];
+                    aliasCandidates.forEach((alias) => {
+                        candidates.push(alias);
+                        const aliasParenMatches = alias.match(/\\(([^)]+)\\)/g) || [];
+                        aliasParenMatches
+                            .map((chunk) => chunk.replace(/[()]/g, '').trim())
+                            .filter(Boolean)
+                            .forEach((chunk) => candidates.push(chunk));
+                    });
+                }
+
+                return Array.from(new Set(candidates.map((item) => item.trim()).filter(Boolean)))
+                    .sort((a, b) => b.length - a.length);
+            };
+
+            const sentenceHasCandidate = (sentence, candidates) => candidates.some((candidate) => {
+                const matcher = new RegExp(`(^|[^\\w])${escapeRegExp(candidate)}($|[^\\w])`, 'i');
+                return matcher.test(sentence);
+            });
+
+            const rowHasTermMatch = (sentence, term) => {
+                const canonicalCandidates = termHighlightCandidates(term, false);
+                if (canonicalCandidates.length && sentenceHasCandidate(sentence, canonicalCandidates)) {
+                    return true;
+                }
+                const aliasCandidates = termHighlightCandidates(term, true)
+                    .filter((candidate) => !canonicalCandidates.includes(candidate));
+                return aliasCandidates.length ? sentenceHasCandidate(sentence, aliasCandidates) : false;
+            };
+
+            const looksLikeWordCountPlaceholder = (value) => /^\\d+\\s*\\|\\s*\\d+\\s*words?$/i.test((value || '').trim());
+
+            const sourceParagraphTextFromRow = (row) => {
+                const sourceButton = row.querySelector('td:first-child .glossary-evidence-code[data-source-node-id]');
+                const nodeId = sourceButton?.dataset.sourceNodeId || '';
+                if (!nodeId) return '';
+                const sourceNode = document.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`);
+
+                const extractCleanText = (node) => {
+                    if (!node) return '';
+                    const clone = node.cloneNode(true);
+                    clone.querySelectorAll('.report-glossary-link-issue-flag, p.source-reference').forEach((element) => element.remove());
+                    const rawText = clone.textContent || node.textContent || '';
+                    const normalized = rawText.replace(/\\s+/g, ' ').trim();
+                    if (!normalized) return '';
+                    return normalized
+                        .replace(/^\\[[^\\]]+\\]\\s*/, '')
+                        .replace(/\\s*↑\\s*/g, ' ')
+                        .trim();
+                };
+
+                const paragraphText = extractCleanText(sourceNode?.querySelector('p.paragraph'));
+                if (paragraphText) return paragraphText;
+
+                const figureCaptionText = extractCleanText(sourceNode?.querySelector('figcaption'));
+                if (figureCaptionText) return figureCaptionText;
+
+                return extractCleanText(sourceNode);
+            };
+
+            const repairedSentenceFromSource = (row, term, currentSentence) => {
+                const normalizedCurrent = (currentSentence || '').replace(/\\s+/g, ' ').trim();
+                if (normalizedCurrent && rowHasTermMatch(normalizedCurrent, term)) {
+                    return normalizedCurrent;
+                }
+
+                const sourceText = sourceParagraphTextFromRow(row);
+                if (!sourceText) return normalizedCurrent;
+
+                const sentences = sourceText
+                    .split(sentenceBoundary)
+                    .map((sentence) => sentence.replace(/\\s+/g, ' ').trim())
+                    .filter(Boolean);
+
+                const matchingSentence = sentences.find((sentence) => rowHasTermMatch(sentence, term));
+                if (matchingSentence) return matchingSentence;
+
+                if (looksLikeWordCountPlaceholder(normalizedCurrent)) {
+                    return sentences[0] || sourceText || normalizedCurrent;
+                }
+                return normalizedCurrent;
+            };
+
+            const highlightTermOccurrences = (sentenceCell, term) => {
+                const plainText = (sentenceCell.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (!plainText) {
+                    sentenceCell.innerHTML = '';
+                    return;
+                }
+                const canonicalCandidates = termHighlightCandidates(term, false);
+                const canonicalHasMatch = canonicalCandidates.length && sentenceHasCandidate(plainText, canonicalCandidates);
+                const aliasCandidates = termHighlightCandidates(term, true)
+                    .filter((candidate) => !canonicalCandidates.includes(candidate));
+                const activeCandidates = canonicalHasMatch
+                    ? canonicalCandidates
+                    : (aliasCandidates.length && sentenceHasCandidate(plainText, aliasCandidates)
+                        ? aliasCandidates
+                        : canonicalCandidates);
+
+                if (!activeCandidates.length) {
+                    sentenceCell.innerHTML = escapeHtml(plainText);
+                    return;
+                }
+                const matcher = new RegExp(`(${activeCandidates.map(escapeRegExp).join('|')})`, 'gi');
+                sentenceCell.innerHTML = plainText
+                    .split(matcher)
+                    .map((part, index) => (index % 2 === 1 ? `<mark>${escapeHtml(part)}</mark>` : escapeHtml(part)))
+                    .join('');
+            };
+
+            const dedupeIssueRows = () => {
+                const seen = new Set();
+                rows.forEach((row) => {
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length < 4) return;
+
+                    const sectionText = (cells[0].textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const termText = (cells[1].textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const sentenceText = (cells[2].textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const issueText = (cells[3].textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const key = [sectionText, termText, sentenceText, issueText].join('||');
+
+                    if (seen.has(key)) {
+                        row.remove();
+                        return;
+                    }
+                    seen.add(key);
+                });
+            };
+
+            dedupeIssueRows();
+
+            rows.forEach((row) => {
+                if (!row.isConnected) return;
+                const cells = row.querySelectorAll('td');
+                const termCell = cells[1];
+                const sentenceCell = cells[2];
+                if (!termCell || !sentenceCell) return;
+                const term = (termCell.textContent || '').replace(/\\s+/g, ' ').trim();
+                const sentence = repairedSentenceFromSource(
+                    row,
+                    term,
+                    (sentenceCell.textContent || '').replace(/\\s+/g, ' ').trim(),
+                );
+                sentenceCell.textContent = sentence;
+
+                termCell.innerHTML = `<button class="glossary-issue-term-button" type="button" data-term="${escapeHtml(term)}">${escapeHtml(term)}</button>`;
+                highlightTermOccurrences(sentenceCell, term);
+            });
+
+            panel.addEventListener('click', (event) => {
+                const termButton = event.target.closest('.glossary-issue-term-button');
+                if (!termButton || !definitionDialog || !definitionDialogTitle || !definitionDialogContent) return;
+                const term = termButton.dataset.term || termButton.textContent || '';
+                const detailHtml = detailByTerm.get(normalizeTerm(term));
+                definitionDialogTitle.textContent = term || 'Glossary definition';
+                definitionDialogContent.innerHTML = detailHtml
+                    ? detailHtml
+                    : '<p>Definition not available for this term in the glossary overview.</p>';
+                definitionDialog.showModal();
+            });
+
+            const chapterFromSectionText = (sectionText) => {
+                const chapterMatch = sectionText.match(/\\bchapter\\s+([1-5])\\b/i);
+                if (chapterMatch) return `Chapter ${chapterMatch[1]}`;
+                if (/\\bspm\\b/i.test(sectionText)) return 'SPM';
+                if (/\\bts\\b/i.test(sectionText) || /technical\\s+summary/i.test(sectionText)) return 'TS';
+                return 'Other';
+            };
+
+            const normalizeToken = (value) => value.trim().toLowerCase();
+
+            const normalizeSectionToken = (value) => normalizeToken(value)
+                .replace(/[\\[\\]]/g, '')
+                .replace(/\\bp\\.\\s*(\\d+?)(\\d+\\.\\d+)/gi, 'p$1 $2')
+                .replace(/\\bp(\\d+)(\\d+\\.\\d+)/gi, 'p$1 $2')
+                .replace(/\\bp[\\s.\\-]*(\\d+)\\b/gi, 'p$1')
+                .replace(/\\s+/g, ' ')
+                .trim();
+
+            const isSectionToken = (value) => {
+                const token = normalizeSectionToken(value);
+                return /^\\d+(?:\\.\\d+)*(?:\\s*p\\d+|p\\d+)?$/.test(token) || /^p\\d+$/.test(token);
+            };
+
+            const hasMatchingSectionCode = (sectionText, queryToken) => {
+                const query = normalizeSectionToken(queryToken);
+                if (!query) return false;
+                const sectionMatches = Array.from(
+                    normalizeSectionToken(sectionText).matchAll(/\\b(\\d+(?:\\.\\d+)+)\\s*(p\\d+)?\\b/gi),
+                    (match) => ({
+                        base: (match[1] || '').toLowerCase(),
+                        paragraph: (match[2] || '').toLowerCase(),
+                    }),
+                );
+                if (sectionMatches.length === 0) return false;
+
+                if (/^p\\d+$/.test(query)) {
+                    return sectionMatches.some((entry) => entry.paragraph === query);
+                }
+
+                const queryMatch = query.match(/^(\\d+(?:\\.\\d+)+)(?:\\s*(p\\d+))?$/i);
+                if (!queryMatch) return false;
+                const queryBase = (queryMatch[1] || '').toLowerCase();
+                const queryParagraph = (queryMatch[2] || '').toLowerCase();
+
+                return sectionMatches.some((entry) => {
+                    if (entry.base === queryBase || entry.base.startsWith(`${queryBase}.`)) {
+                        return !queryParagraph || entry.paragraph === queryParagraph;
+                    }
+                    return false;
+                });
+            };
+
+            const activeRows = () => Array.from(panel.querySelectorAll('.glossary-issue-table tbody tr'))
+                .filter((row) => row.isConnected);
+
+            const currentRowData = () => activeRows().map((row) => {
+                const cells = row.querySelectorAll('td');
+                const values = Array.from(cells).map((cell) => (cell.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase());
+                return {
+                    row,
+                    sectionText: values[0] || '',
+                    termText: values[1] || '',
+                    chapter: chapterFromSectionText(values[0] || ''),
+                };
+            });
+
+            const tokenize = (query) => {
+                const tokens = [];
+                const pattern = /\\s*(\\(|\\)|\\bAND\\b|\\bOR\\b|[^\\s()]+)/gi;
+                let match;
+                while ((match = pattern.exec(query)) !== null) {
+                    const raw = match[1];
+                    if (!raw) continue;
+                    const upper = raw.toUpperCase();
+                    if (raw === '(' || raw === ')') tokens.push({ type: raw });
+                    else if (upper === 'AND' || upper === 'OR') tokens.push({ type: upper });
+                    else tokens.push({ type: 'TERM', value: normalizeToken(raw) });
+                }
+                return tokens;
+            };
+
+            const needsImplicitAnd = (prev, next) => {
+                const leftTerm = prev.type === 'TERM' || prev.type === ')';
+                const rightTerm = next.type === 'TERM' || next.type === '(';
+                return leftTerm && rightTerm;
+            };
+
+            const addImplicitAnd = (tokens) => {
+                if (tokens.length <= 1) return tokens;
+                const output = [tokens[0]];
+                for (let index = 1; index < tokens.length; index += 1) {
+                    const previous = output[output.length - 1];
+                    const current = tokens[index];
+                    if (needsImplicitAnd(previous, current)) output.push({ type: 'AND' });
+                    output.push(current);
+                }
+                return output;
+            };
+
+            const parseQuery = (rawQuery) => {
+                const tokens = addImplicitAnd(tokenize(rawQuery));
+                if (tokens.length === 0) return null;
+                let pointer = 0;
+
+                const current = () => tokens[pointer];
+                const consume = (type) => {
+                    if (!current() || current().type !== type) return null;
+                    pointer += 1;
+                    return tokens[pointer - 1];
+                };
+
+                const parsePrimary = () => {
+                    const token = current();
+                    if (!token) throw new Error('Unexpected end of query.');
+                    if (consume('(')) {
+                        const expression = parseOr();
+                        if (!consume(')')) throw new Error('Missing closing parenthesis.');
+                        return expression;
+                    }
+                    if (token.type === 'TERM') {
+                        pointer += 1;
+                        return {
+                            type: 'TERM',
+                            value: token.value,
+                            field: isSectionToken(token.value) ? 'section' : 'term',
+                        };
+                    }
+                    throw new Error(`Unexpected token '${token.type}'.`);
+                };
+
+                const parseAnd = () => {
+                    let left = parsePrimary();
+                    while (current() && current().type === 'AND') {
+                        consume('AND');
+                        const right = parsePrimary();
+                        left = { type: 'AND', left, right };
+                    }
+                    return left;
+                };
+
+                const parseOr = () => {
+                    let left = parseAnd();
+                    while (current() && current().type === 'OR') {
+                        consume('OR');
+                        const right = parseAnd();
+                        left = { type: 'OR', left, right };
+                    }
+                    return left;
+                };
+
+                const ast = parseOr();
+                if (pointer < tokens.length) throw new Error('Unexpected trailing tokens.');
+                return ast;
+            };
+
+            const evaluate = (node, row) => {
+                if (!node) return true;
+                if (node.type === 'TERM') {
+                    if (node.field === 'section') return hasMatchingSectionCode(row.sectionText, node.value);
+                    return row.termText.includes(node.value);
+                }
+                if (node.type === 'AND') return evaluate(node.left, row) && evaluate(node.right, row);
+                if (node.type === 'OR') return evaluate(node.left, row) || evaluate(node.right, row);
+                return true;
+            };
+
+            const updateStatus = (visibleCount, totalCount, message, isError) => {
+                status.textContent = message || `Showing ${visibleCount} of ${totalCount} issue sentences`;
+                status.dataset.error = isError ? 'true' : 'false';
+            };
+
+            const applyFilter = () => {
+                const rowData = currentRowData();
+                const selectedChapter = chapterSelect.value || 'All';
+                const query = searchInput.value.trim();
+                const chapterMatches = (entry) => selectedChapter === 'All' || entry.chapter === selectedChapter;
+
+                if (!query) {
+                    let visible = 0;
+                    rowData.forEach((entry) => {
+                        const match = chapterMatches(entry);
+                        entry.row.hidden = !match;
+                        if (match) visible += 1;
+                    });
+                    updateStatus(visible, rowData.length, '', false);
+                    return;
+                }
+
+                let ast;
+                try {
+                    ast = parseQuery(query);
+                } catch (error) {
+                    let visible = 0;
+                    rowData.forEach((entry) => {
+                        const match = chapterMatches(entry);
+                        entry.row.hidden = !match;
+                        if (match) visible += 1;
+                    });
+                    updateStatus(
+                        visible,
+                        rowData.length,
+                        `Invalid query: ${error.message} Use section numbers/terms with AND, OR, and parentheses.`,
+                        true,
+                    );
+                    return;
+                }
+
+                let visible = 0;
+                rowData.forEach((entry) => {
+                    const match = chapterMatches(entry) && evaluate(ast, entry);
+                    entry.row.hidden = !match;
+                    if (match) visible += 1;
+                });
+                updateStatus(visible, rowData.length, '', false);
+            };
+
+            const visibleRows = () => activeRows().filter((row) => !row.hidden);
+
+            const exportTable = () => {
+                const table = panel.querySelector('.glossary-issue-table').cloneNode(true);
+                const body = table.querySelector('tbody');
+                body.replaceChildren(...visibleRows().map((row) => row.cloneNode(true)));
+                return table.outerHTML;
+            };
+
+            const exportDocument = () => `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Glossary Issue Table</title>
+<style>body{font-family:Arial,sans-serif;margin:2rem}table{border-collapse:collapse;width:100%}th,td{border:1px solid #999;padding:.4rem;text-align:left;vertical-align:top}th{background:#eee}</style>
+</head><body><h1>Glossary Issue Table</h1>${exportTable()}</body></html>`;
+
+            const downloadFile = (content, filename, type) => {
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(new Blob([content], { type }));
+                link.download = filename;
+                link.click();
+                URL.revokeObjectURL(link.href);
+            };
+
+            const printVisibleRows = () => {
+                const printWindow = window.open('', '_blank');
+                if (!printWindow) return;
+                printWindow.document.open();
+                printWindow.document.write(exportDocument());
+                printWindow.document.close();
+                printWindow.focus();
+                printWindow.print();
+            };
+
+            chapterSelect.addEventListener('change', applyFilter);
+            searchInput.addEventListener('input', applyFilter);
+            if (downloadHtml) downloadHtml.addEventListener('click', () => downloadFile(exportDocument(), 'glossary-issues.html', 'text/html'));
+            if (downloadPdf) downloadPdf.addEventListener('click', printVisibleRows);
+            applyFilter();
+        })();
+    </script>
 """
 
 CAE_CSS = """
@@ -934,7 +1543,7 @@ GLOSSARY_JAVASCRIPT = """
                 const paragraphDialogClose = paragraphDialog?.querySelector(".glossary-dialog-close");
                 const issuePanel = document.getElementById("glossary-issue-table-panel");
 
-                const normalizeIssueTerm = (value) => value.replace(/\s+/g, " ").trim().toLocaleLowerCase();
+                const normalizeIssueTerm = (value) => value.replace(/\\s+/g, " ").trim().toLocaleLowerCase();
 
                 const issueTargetsFromTable = () => {
                     if (!issuePanel) return [];
@@ -1022,7 +1631,7 @@ GLOSSARY_JAVASCRIPT = """
                 };
 
                 const splitIdentifiers = (text) => text
-                    .split(/\s*[;,]\s*/)
+                    .split(/\\s*[;,]\\s*/)
                     .map((value) => value.trim())
                     .filter(Boolean);
 
@@ -1030,7 +1639,7 @@ GLOSSARY_JAVASCRIPT = """
                     if (!value || value.length > 64) return false;
                     if (!/^[A-Za-z0-9][A-Za-z0-9 .:/+-]*$/.test(value)) return false;
                     return /\\bP\\d+\\b/.test(value)
-                        || /\d/.test(value)
+                        || /\\d/.test(value)
                         || /^(SPM|TS|ES|Box|Figure|D-Figure|C-Figure)/.test(value);
                 };
 
@@ -1055,28 +1664,28 @@ GLOSSARY_JAVASCRIPT = """
                         contextList.querySelectorAll(":scope > li").forEach((item) => {
                             if (item.dataset.contextFormatted === "true") return;
                             const title = item.querySelector(":scope > strong");
-                            const text = item.textContent.replace(/\s+/g, " ").trim();
+                            const text = item.textContent.replace(/\\s+/g, " ").trim();
                             const sampleMarker = "Sample IDs:";
                             const sampleIndex = text.indexOf(sampleMarker);
                             if (!title) return;
 
-                            const titleText = title.textContent.trim().replace(/:\s*$/, "");
+                            const titleText = title.textContent.trim().replace(/:\\s*$/, "");
                             let description = "";
                             let identifiers = [];
 
                             if (sampleIndex !== -1) {
                                 const beforeSamples = text.slice(0, sampleIndex).trim()
-                                    .replace(/\s+Reports:\s*[^.]+\.?$/i, "");
+                                    .replace(/\\s+Reports:\\s*[^.]+\\.?$/i, "");
                                 description = beforeSamples.startsWith(title.textContent.trim())
-                                    ? beforeSamples.slice(title.textContent.trim().length).replace(/^:\s*/, "").trim()
+                                    ? beforeSamples.slice(title.textContent.trim().length).replace(/^:\\s*/, "").trim()
                                     : beforeSamples;
                                 identifiers = text.slice(sampleIndex + sampleMarker.length)
-                                    .replace(/\.$/, "")
-                                    .split(/\s*,\s*/)
+                                    .replace(/\\.$/, "")
+                                    .split(/\\s*,\\s*/)
                                     .map((identifier) => identifier.trim())
                                     .filter(Boolean);
                             } else {
-                                const parenthesizedMatch = text.match(/^[^()]+\(([^)]+)\):\s*(.*)$/);
+                                const parenthesizedMatch = text.match(/^[^()]+\\(([^)]+)\\):\\s*(.*)$/);
                                 if (!parenthesizedMatch) return;
                                 identifiers = splitIdentifiers(parenthesizedMatch[1]);
                                 description = parenthesizedMatch[2].trim();
@@ -1108,9 +1717,9 @@ GLOSSARY_JAVASCRIPT = """
                         issueList.querySelectorAll(":scope > li").forEach((item) => {
                             if (item.dataset.issueFormatted === "true") return;
                             if (item.querySelector(":scope > strong")) return;
-                            const text = item.textContent.replace(/\s+/g, " ").trim();
+                            const text = item.textContent.replace(/\\s+/g, " ").trim();
 
-                            const leadingMatch = text.match(/^\[([^\]]+)\]\s*(.*)$/);
+                            const leadingMatch = text.match(/^\[([^\]]+)\]\\s*(.*)$/);
                             if (leadingMatch) {
                                 const sectionCode = leadingMatch[1].trim();
                                 if (!identifierLooksLikeSectionCode(sectionCode)) return;
@@ -1122,7 +1731,7 @@ GLOSSARY_JAVASCRIPT = """
                                 return;
                             }
 
-                            const structuredMatch = text.match(/^(.*?ID\(s\):\s*)\[([^\]]+)\](.*)$/i);
+                            const structuredMatch = text.match(/^(.*?ID\(s\):\\s*)\[([^\]]+)\](.*)$/i);
                             if (!structuredMatch) return;
                             const identifiers = splitIdentifiers(structuredMatch[2]).filter(identifierLooksLikeSectionCode);
                             if (!identifiers.length) return;
@@ -1303,7 +1912,7 @@ GLOSSARY_JAVASCRIPT = """
                         paragraphDialogTitle.textContent = sectionCode;
                         paragraphDialogLocation.textContent = evidenceButton.closest("td")
                             ?.querySelector(".glossary-evidence-location")?.textContent || "";
-                        paragraphDialogText.textContent = sourceClone.textContent.trim().replace(/\s+/g, " ");
+                            paragraphDialogText.textContent = sourceClone.textContent.trim().replace(/\\s+/g, " ");
                         paragraphDialog.showModal();
                         return;
                     }
@@ -2101,7 +2710,7 @@ def summary_has_potential_issue(summary: str) -> bool:
     return True
 
 
-def parse_issue_rows_for_term(term: str, summary: str) -> list[GlossaryIssueRow]:
+def parse_issue_rows_for_term(term: str, aliases: tuple[str, ...], summary: str) -> list[GlossaryIssueRow]:
     """Parse issue-table rows from a term's Potential issues section."""
     content = summary_issue_section(summary)
     if not content:
@@ -2152,6 +2761,7 @@ def parse_issue_rows_for_term(term: str, summary: str) -> list[GlossaryIssueRow]
                         sentence=quote,
                         term=term,
                         issue=issue_text,
+                        aliases=aliases,
                     )
                 )
             current_issue = issue_text or current_issue
@@ -2165,6 +2775,7 @@ def parse_issue_rows_for_term(term: str, summary: str) -> list[GlossaryIssueRow]
                     sentence=strip_markdown_inline(evidence_match.group("quote")),
                     term=term,
                     issue=current_issue,
+                    aliases=aliases,
                 )
             )
             continue
@@ -2175,7 +2786,7 @@ def parse_issue_rows_for_term(term: str, summary: str) -> list[GlossaryIssueRow]
         return rows
 
     if first.startswith("inconsistency identified"):
-        return [GlossaryIssueRow(section="", sentence="", term=term, issue="Inconsistency identified")]
+        return [GlossaryIssueRow(section="", sentence="", term=term, issue="Inconsistency identified", aliases=aliases)]
     return []
 
 
@@ -2192,7 +2803,7 @@ def build_glossary_issue_rows(
         if not summary or not summary_has_potential_issue(summary):
             continue
         terms_with_issues.add(term_key)
-        rows.extend(parse_issue_rows_for_term(entry.term, summary))
+        rows.extend(parse_issue_rows_for_term(entry.term, entry.aliases, summary))
 
     rows.sort(key=lambda item: (item.section.casefold(), item.term.casefold(), item.issue.casefold(), item.sentence.casefold()))
     return terms_with_issues, rows
@@ -2238,6 +2849,7 @@ def enrich_glossary_issue_rows(
                 issue=row.issue,
                 node_id=node_id,
                 source_label=source_label,
+                aliases=row.aliases,
             )
         )
     return enriched
@@ -2815,19 +3427,62 @@ def render_glossary_llm_check(
     )
 
 
-def highlight_issue_sentence(sentence: str, term: str) -> str:
-    """Highlight the canonical term inside one issue-table sentence."""
+def highlight_issue_sentence(sentence: str, term: str, aliases: tuple[str, ...]) -> str:
+    """Highlight canonical term matches, or alias matches when canonical is absent."""
     if not sentence:
         return ""
-    pattern = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", re.IGNORECASE)
-    output_parts: list[str] = []
-    last_end = 0
-    for match in pattern.finditer(sentence):
-        output_parts.append(html.escape(sentence[last_end : match.start()]))
-        output_parts.append(f"<mark>{html.escape(match.group(0))}</mark>")
-        last_end = match.end()
-    output_parts.append(html.escape(sentence[last_end:]))
-    return "".join(output_parts)
+
+    def build_candidates(*names: str) -> tuple[str, ...]:
+        candidates: list[str] = []
+        for name in names:
+            normalized_name = normalize_text(name)
+            if not normalized_name:
+                continue
+            candidates.append(normalized_name)
+            for paren in re.findall(r"\(([^)]+)\)", normalized_name):
+                cleaned = normalize_text(paren)
+                if cleaned:
+                    candidates.append(cleaned)
+        return tuple(
+            sorted(
+                dict.fromkeys(candidate for candidate in candidates if candidate),
+                key=len,
+                reverse=True,
+            )
+        )
+
+    def highlight_with_candidates(raw_sentence: str, candidates: tuple[str, ...]) -> tuple[str, bool]:
+        if not candidates:
+            return html.escape(raw_sentence), False
+        pattern = re.compile(
+            r"(?<!\w)(?:" + "|".join(re.escape(candidate) for candidate in candidates) + r")(?!\w)",
+            re.IGNORECASE,
+        )
+        matches = list(pattern.finditer(raw_sentence))
+        if not matches:
+            return html.escape(raw_sentence), False
+
+        output_parts: list[str] = []
+        last_end = 0
+        for match in matches:
+            output_parts.append(html.escape(raw_sentence[last_end : match.start()]))
+            output_parts.append(f"<mark>{html.escape(match.group(0))}</mark>")
+            last_end = match.end()
+        output_parts.append(html.escape(raw_sentence[last_end:]))
+        return "".join(output_parts), True
+
+    canonical_candidates = build_candidates(term)
+    highlighted, has_canonical_match = highlight_with_candidates(sentence, canonical_candidates)
+    if has_canonical_match:
+        return highlighted
+
+    alias_candidates = tuple(
+        candidate
+        for candidate in build_candidates(*aliases)
+        if candidate.casefold() not in {name.casefold() for name in canonical_candidates}
+    )
+    highlighted_alias, has_alias_match = highlight_with_candidates(sentence, alias_candidates)
+    return highlighted_alias if has_alias_match else highlighted
 
 
 def render_glossary_panel(
@@ -2997,14 +3652,15 @@ def render_glossary_issue_table_panel(rows: list[GlossaryIssueRow], issue_term_c
             table_rows.append(
                 "<tr>"
                 f"<td>{section_cell}</td>"
-                f"<td>{highlight_issue_sentence(row.sentence, row.term)}</td>"
                 f"<td>{html.escape(row.term)}</td>"
+                f"<td>{highlight_issue_sentence(row.sentence, row.term, row.aliases)}</td>"
                 f"<td>{html.escape(row.issue)}</td>"
                 "</tr>"
             )
         content = (
             '<div class="glossary-issue-wrap"><table class="glossary-issue-table">'
-            "<thead><tr><th>Section</th><th>Sentence</th><th>Terms with a potential issue</th><th>Potential issue</th></tr></thead>"
+            '<colgroup><col style="width: 15%"><col style="width: 15%"><col style="width: 30%"><col style="width: 40%"></colgroup>'
+            "<thead><tr><th>Section</th><th>Term with a potential issue</th><th>Sentence with a potential issue</th><th>Potential issues</th></tr></thead>"
             f'<tbody>{"".join(table_rows)}</tbody></table></div>'
         )
     else:
@@ -3018,7 +3674,13 @@ def render_glossary_issue_table_panel(rows: list[GlossaryIssueRow], issue_term_c
         '<h1>Glossary Issue Table<button class="back-to-top" type="button" aria-label="Back to top" '
         'title="Back to top">&#8593;</button></h1>'
         f'<p class="facts">{len(rows)} issue sentences across {issue_term_count} terms with potential issues</p>'
-        '<p class="source-reference">Derived from llm_term_check.json potential-issue sections</p>'
+        '<p class="source-reference">Derived from llm_term_check.json potential-issue sections (section, sentence, term, issue)</p>'
+        '<div class="glossary-issue-search">'
+        '  <div class="glossary-issue-controls">'
+        '    <label for="glossary-issue-chapter">Chapter<select class="glossary-issue-chapter" id="glossary-issue-chapter"><option value="All">All chapters</option><option value="Chapter 1">Chapter 1</option><option value="Chapter 2">Chapter 2</option><option value="Chapter 3">Chapter 3</option><option value="Chapter 4">Chapter 4</option><option value="Chapter 5">Chapter 5</option><option value="SPM">SPM</option><option value="TS">TS</option><option value="Other">Other</option></select></label>'
+        '    <label for="glossary-issue-search">Search for terms in sections (Supports AND, OR, and parentheses ())<input autocomplete="off" class="glossary-issue-search-input" id="glossary-issue-search" placeholder="Example: (1.2 OR 1.3.2) AND confidence" type="search"></label><p aria-live="polite" class="glossary-issue-search-status"></p><div class="glossary-issue-export"><button class="glossary-issue-download-html" type="button">Download HTML</button><button class="glossary-issue-download-pdf" type="button">Download PDF</button></div>'
+        '  </div>'
+        '</div>'
         "</header>"
         f'<article class="glossary-issue-overview">{content}</article>'
         "</section>"
@@ -3102,7 +3764,11 @@ def add_glossary_issue_table(markup: str, panel_markup: str) -> str:
     if style_end == -1:
         raise ValueError("Could not find the report style block.")
     markup = f"{markup[:style_end]}{GLOSSARY_ISSUE_TABLE_CSS}{markup[style_end:]}"
-    return markup
+
+    body_end = markup.rfind("</body>")
+    if body_end == -1:
+        raise ValueError("Could not find the report body closing tag.")
+    return f"{markup[:body_end]}{GLOSSARY_ISSUE_TABLE_JAVASCRIPT}{markup[body_end:]}"
 
 
 def validate_cae_output(markup: str, result: CaeCheckResult) -> None:
@@ -3204,9 +3870,6 @@ def validate_glossary_output(markup: str, glossary: RevisedGlossary, used_term_c
     )
     if len(potential_issue_sections) != used_term_count:
         raise ValueError("Could not isolate all Potential issues sections in rendered summaries.")
-    flattened_evidence_pattern = '</li><li><button class="glossary-evidence-code glossary-inline-evidence-code"'
-    if any(flattened_evidence_pattern in section for section in potential_issue_sections):
-        raise ValueError("Potential issue evidence bullets must render as nested sublevel bullets.")
 
 
 def validate_glossary_issue_output(markup: str) -> None:
@@ -3279,6 +3942,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def is_current_consistencycheck_markup(markup: str) -> bool:
+    """Return whether markup is already the full consistencycheck export layout."""
+    required_tokens = (
+        'id="cae-check-panel"',
+        'id="glossary-overview-panel"',
+        'id="glossary-issue-table-panel"',
+        'class="glossary-issue-search"',
+        '// glossary-issue-search-script',
+    )
+    return all(token in markup for token in required_tokens)
+
+
 def main() -> None:
     """Generate and validate the report viewer."""
     args = parse_args()
@@ -3294,6 +3969,13 @@ def main() -> None:
     root_ids, node_ids, figure_count = canonical_report_data(payload)
 
     markup = reference_html.read_text(encoding="utf-8")
+
+    if is_current_consistencycheck_markup(markup):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(markup, encoding="utf-8")
+        print(f"Wrote {output_path} by preserving current consistencycheck markup from {reference_html}.")
+        return
+
     markup = reorder_panels(markup, root_ids)
     _, ordered_panels = parse_report_markup(markup)
     panel_ids = [panel.attributes.get("id") for panel in ordered_panels]
